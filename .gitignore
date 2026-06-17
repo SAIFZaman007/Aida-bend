@@ -92,3 +92,4 @@ Thumbs.db
  
 # ── Docker (local overrides only) ────────────
 docker-compose.override.yml
+.gitignore

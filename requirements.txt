@@ -4,24 +4,25 @@ uvicorn[standard]==0.34.0
 pydantic==2.10.4
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
-
-# --- Database: Postgres 18 + pgvector ---
+ 
+# --- Database: Postgres + pgvector ---
 sqlalchemy==2.0.36
 asyncpg==0.30.0
 pgvector==0.3.6
-
+ 
 # --- Cache / pub-sub: Redis 8 ---
 redis==5.2.1
-
+ 
 # --- LLM providers ---
-httpx==0.28.1            # talks to Ollama (free, local) — also serves qwen3-coder
-anthropic==0.42.0        # Claude API (only used when LLM_PROVIDER=anthropic)
-
-# --- Voice: natural local text-to-speech (CPU, free) ---
+httpx==0.28.1
+anthropic==0.42.0
+ 
+# --- Voice: TTS (Piper) ---
 piper-tts==1.4.2
-
-# --- Voice: local speech-to-text ---
+ 
+# --- Voice: STT (faster-whisper) ---
+requests==2.32.3
 faster-whisper==1.1.0
-
+ 
 # --- Utilities ---
 python-multipart==0.0.20

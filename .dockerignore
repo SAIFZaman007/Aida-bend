@@ -1,10 +1,28 @@
+# Python runtime artifacts
 venv/
+.venv/
 __pycache__/
 **/__pycache__/
 *.pyc
 *.pyo
-*.pyd
-aida.db
+
+# Local secrets — NEVER bake into Docker image
+# These are injected via Coolify Environment Variables at runtime
 .env
-.git
-*.md
+.env.*
+!.env.example
+
+# SQLite (migrated to Postgres)
+*.db
+*.sqlite
+*.sqlite3
+
+# Git internals
+.git/
+.gitignore
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.log
