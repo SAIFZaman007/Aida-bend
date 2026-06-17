@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    container_name: aida-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aida
+      POSTGRES_PASSWORD: aida
+      POSTGRES_DB: aida_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - aida_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aida -d aida_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    container_name: aida-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - aida_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  aida_pgdata:
+  aida_redisdata:

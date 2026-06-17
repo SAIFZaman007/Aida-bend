@@ -1,0 +1,94 @@
+# ═══════════════════════════════════════════════
+#  AIDA — Backend .gitignore
+#  FastAPI · Postgres · pgvector · Redis · Piper
+# ═══════════════════════════════════════════════
+ 
+ 
+# ── Secrets & local config ───────────────────
+.env
+.env.*
+!.env.example
+*.env.local
+secrets.json
+ 
+ 
+# ── Python runtime ───────────────────────────
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.so
+ 
+ 
+# ── Virtual environments ─────────────────────
+venv/
+.venv/
+env/
+.env/
+ENV/
+ 
+ 
+# ── Distribution / packaging ─────────────────
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+MANIFEST
+.eggs/
+ 
+ 
+# ── Database files (SQLite — now migrated) ───
+*.db
+*.sqlite
+*.sqlite3
+aida.db
+ 
+ 
+# ── Piper voice models (large binaries) ──────
+# Re-download with:  python download_voices.py
+voices/
+*.onnx
+*.onnx.json
+ 
+ 
+# ── faster-whisper / Hugging Face cache ──────
+.cache/
+huggingface/
+whisper_cache/
+models/
+ 
+ 
+# ── Logs ─────────────────────────────────────
+*.log
+*.log.*
+logs/
+ 
+ 
+# ── Testing & coverage ───────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+ 
+ 
+# ── Type checking ─────────────────────────────
+.mypy_cache/
+.pytype/
+.pyre/
+ 
+ 
+# ── Editor & OS ──────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+ 
+ 
+# ── Docker (local overrides only) ────────────
+docker-compose.override.yml
