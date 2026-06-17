@@ -1,9 +1,13 @@
+"""
+AIDA Backend — Application Entrypoint v2.0.0
+"""
 import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from src.chat.router import router as chat_router
 from src.core import redis_client
@@ -14,7 +18,8 @@ from src.core.llm import llm
 from src.voice.router import router as voice_router
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("aida")
 
@@ -55,7 +60,8 @@ async def lifespan(app: FastAPI):
     redis_ok = await _check_redis()
     await _check_ollama()
     log.info(
-        "AIDA backend ready  provider=%s  chat=%s  coder=%s  db=postgres+pgvector  cache=%s",
+        "AIDA backend ready  provider=%s  chat=%s  coder=%s  "
+        "db=postgres+pgvector  cache=%s",
         settings.llm_provider,
         settings.chat_model,
         settings.coder_model,
@@ -67,9 +73,13 @@ async def lifespan(app: FastAPI):
     await db_aclose()
 
 
-app = FastAPI(title="A.I.D.A — Personal AI Assistant", version="2.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="A.I.D.A — Personal AI Assistant",
+    version="2.0.0",
+    lifespan=lifespan,
+)
 
-# ── CORS ──────────────────────────────────────────────────────────────────────
+# ── CORS ──────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_list,
@@ -77,13 +87,20 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["*"],
-    max_age=600, 
+    max_age=600,
 )
 
 app.include_router(chat_router, prefix="/api")
 app.include_router(voice_router, prefix="/api")
 
 
+# ── Root route ────────────────────────────────────────────────────────
+@app.get("/")
+async def root() -> JSONResponse:
+    return JSONResponse({"status": "ok", "service": "aida-backend"})
+
+
+# ── Health endpoint ───────────────────────────────────────────────────
 @app.get("/api/health")
 async def health() -> dict:
     redis_alive = False
@@ -106,4 +123,9 @@ async def health() -> dict:
 
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host=settings.app_host, port=settings.app_port, reload=True)
+    uvicorn.run(
+        "app:app",
+        host=settings.app_host,
+        port=settings.app_port,
+        reload=True,
+    )
