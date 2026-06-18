@@ -37,7 +37,7 @@ from src.memory import service as memory
 from src.memory.models import Conversation, Message
 
 HISTORY_WINDOW = 8
-RECALL_TIMEOUT = 2.0
+RECALL_TIMEOUT = 0.5
 
 _SENTENCE_RE = re.compile(r"[^.!?:\n]*[.!?:\n]+")
 

@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     # General-purpose chat model (executive, writer, researcher, etc.)
     chat_model: str = "llama3.2"
     # Code-specialized model used for developer / architect / coder personas.
-    coder_model: str = "qwen3-coder"
+    coder_model: str = "qwen3.5:4b"
     embed_model: str = "nomic-embed-text"
 
     anthropic_api_key: str = ""
