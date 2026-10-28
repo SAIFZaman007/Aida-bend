@@ -17,7 +17,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # env_ignore_empty: a blank `KEY=` line in .env (as shipped in
+    # .env.example for optional settings) means "use the default", not "".
+    # Without it, a blank numeric/optional field fails validation at import.
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", env_ignore_empty=True
+    )
 
     # --- Server ---
     app_host: str = "127.0.0.1"
@@ -50,7 +55,14 @@ class Settings(BaseSettings):
     # developer / architect / coder personas (empty = same as chat model).
     gemini_chat_model: str = "gemini-3.8-flash"
     gemini_coder_model: str = ""
-    # Gemini 3 "thinking": low = fast conversational replies. Empty = API default.
+    # Optional backup model used automatically if the primary stalls or is
+    # unavailable (e.g. a previous-generation Flash). Empty = no model failover.
+    gemini_fallback_model: str = ""
+    # Gemini 3 "thinking". NOTE: allowed values differ PER MODEL — for
+    # gemini-3.8-flash Google lists low | medium | high ("minimal" is NOT
+    # accepted there). low = fast conversational replies. Empty = API default.
+    # If the API rejects the level the app drops it for that model automatically
+    # and logs a warning (see core/gemini.py), so a wrong value cannot break chat.
     gemini_thinking_level: str = "low"
     # Google recommends leaving temperature at its default (1.0) for Gemini 3
     # models — lowering it can cause looping/degraded output. Leave empty unless
@@ -70,7 +82,8 @@ class Settings(BaseSettings):
     anthropic_max_tokens: int = 2048
 
     # --- Reliability ---
-    llm_first_token_timeout: float = 25.0  # seconds until the first token
+    llm_first_token_timeout: float = 15.0  # seconds until the first token (stream)
+    llm_once_timeout: float = 25.0         # whole non-streaming fallback call
     llm_idle_timeout: float = 30.0         # max silence between tokens
     llm_max_retries: int = 2               # transient errors, only pre-first-token
     embed_timeout: float = 10.0
@@ -78,7 +91,7 @@ class Settings(BaseSettings):
 
     # --- Voice: speech-to-text (Gemini audio understanding) ---
     gemini_stt_model: str = "gemini-3.8-flash"
-    gemini_stt_thinking_level: str = "minimal"
+    gemini_stt_thinking_level: str = "low"  # 3.8-flash: low|medium|high (no "minimal")
     max_audio_bytes: int = 10 * 1024 * 1024
 
     # --- Voice: text-to-speech (Gemini TTS; auto-detects Bangla/English) ---
@@ -144,6 +157,11 @@ class Settings(BaseSettings):
         if self.is_anthropic:
             return self.anthropic_coder_model or self.anthropic_model
         return self.gemini_coder_model or self.gemini_chat_model
+
+    @property
+    def fallback_model(self) -> str:
+        """Backup chat model (Gemini only); '' when none is configured."""
+        return "" if self.is_anthropic else self.gemini_fallback_model.strip()
 
     def model_for_persona(self, persona: str) -> str:
         """Pick the chat vs. coder model based on persona."""

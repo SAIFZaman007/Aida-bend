@@ -19,21 +19,36 @@ class Chunk:
         self.candidates = []
 
 
-def fake_client(plans):
+def fake_client(plans, once_plans=None):
     """plans: list (one per call) of callables returning an async iterator of chunks,
-    or an exception to raise when the stream is created."""
-    calls = {"n": 0, "configs": []}
+    or an exception to raise when the stream is created.
+    once_plans: same idea for the non-streaming generate_content (value = response
+    object, an Exception to raise, or a float = seconds to hang)."""
+    calls = {"n": 0, "configs": [], "once": 0, "models": []}
 
     async def generate_content_stream(*, model, contents, config):
         plan = plans[min(calls["n"], len(plans) - 1)]
         calls["n"] += 1
         calls["configs"].append((model, contents, config))
+        calls["models"].append(("stream", model))
         if isinstance(plan, Exception):
             raise plan
         return plan()
 
+    async def generate_content(*, model, contents, config):
+        plan = (once_plans or [Exception("no once plan")])[min(calls["once"], len(once_plans or [0]) - 1)]
+        calls["once"] += 1
+        calls["configs"].append((model, contents, config))
+        calls["models"].append(("once", model))
+        if isinstance(plan, Exception):
+            raise plan
+        if isinstance(plan, float):
+            await _REAL_SLEEP(plan)
+        return plan
+
     client = types.SimpleNamespace(
-        aio=types.SimpleNamespace(models=types.SimpleNamespace(generate_content_stream=generate_content_stream))
+        aio=types.SimpleNamespace(models=types.SimpleNamespace(
+            generate_content_stream=generate_content_stream, generate_content=generate_content))
     )
     return client, calls
 
@@ -54,6 +69,9 @@ def fast(monkeypatch):
     monkeypatch.setattr(settings, "llm_max_retries", 2)
     monkeypatch.setattr(settings, "llm_first_token_timeout", 0.3)
     monkeypatch.setattr(settings, "llm_idle_timeout", 0.3)
+    monkeypatch.setattr(settings, "llm_once_timeout", 0.3)
+    monkeypatch.setattr(settings, "gemini_fallback_model", "")
+    gemini._NO_THINKING.clear()
     monkeypatch.setattr(asyncio, "sleep", _fast_sleep(_REAL_SLEEP))
 
 
@@ -135,13 +153,59 @@ async def test_auth_error_is_not_retried_and_maps_to_not_configured(monkeypatch)
     assert ei.value.code == "not_configured" and calls["n"] == 1
 
 
-async def test_first_token_timeout(monkeypatch):
-    monkeypatch.setattr(settings, "llm_max_retries", 0)
-    client, _ = fake_client([stream_of(Chunk("late"), delay=1.0)])
+def once_response(text):
+    return types.SimpleNamespace(text=text, prompt_feedback=None, candidates=[])
+
+
+async def test_stalled_stream_falls_back_to_non_streaming(monkeypatch):
+    # The production incident: stream never yields a first token.
+    client, calls = fake_client([stream_of(Chunk("late"), delay=1.0)], [once_response("hello")])
+    use(monkeypatch, client)
+    assert await collect() == ["hello"]
+    assert calls["models"] == [("stream", settings.gemini_chat_model), ("once", settings.gemini_chat_model)]
+
+
+async def test_stall_everywhere_then_fallback_model(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_fallback_model", "backup-m")
+    client, calls = fake_client(
+        [stream_of(Chunk("late"), delay=1.0), stream_of(Chunk("from backup"))], [3.0])
+    use(monkeypatch, client)
+    assert await collect() == ["from backup"]
+    assert calls["models"] == [("stream", settings.gemini_chat_model),
+                               ("once", settings.gemini_chat_model),
+                               ("stream", "backup-m")]
+
+
+async def test_timeout_when_every_route_stalls(monkeypatch):
+    client, _ = fake_client([stream_of(Chunk("late"), delay=1.0)], [3.0])
     use(monkeypatch, client)
     with pytest.raises(AidaError) as ei:
         await collect()
     assert ei.value.code == "timeout"
+
+
+async def test_thinking_level_rejected_is_self_healed(monkeypatch):
+    bad = genai_errors.APIError(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT",
+        "message": "Thinking level MINIMAL is not supported for this model."}})
+    client, calls = fake_client([bad, stream_of(Chunk("ok"))])
+    use(monkeypatch, client)
+    assert await collect() == ["ok"]
+    assert calls["configs"][0][2].thinking_config is not None
+    assert calls["configs"][1][2].thinking_config is None          # retried without it
+    assert settings.gemini_chat_model in gemini._NO_THINKING
+    # ...and later calls skip the bad setting up front.
+    client2, calls2 = fake_client([stream_of(Chunk("x"))])
+    use(monkeypatch, client2)
+    await collect()
+    assert calls2["configs"][0][2].thinking_config is None
+
+
+async def test_unrelated_400_is_not_swallowed(monkeypatch):
+    client, calls = fake_client([api_error(400)])
+    use(monkeypatch, client)
+    with pytest.raises(AidaError) as ei:
+        await collect()
+    assert ei.value.code == "internal" and calls["n"] == 1
 
 
 async def test_blocked_content_is_final_not_retried(monkeypatch):

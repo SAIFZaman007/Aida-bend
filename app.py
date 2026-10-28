@@ -1,5 +1,5 @@
 """
-AIDA Backend — Application Entrypoint v2.1.0
+AIDA Backend — Application Entrypoint v2.2.0
 """
 import asyncio
 import logging
@@ -20,7 +20,7 @@ from src.core.errors import http_detail, request_lang
 from src.core.llm import llm
 from src.voice.router import router as voice_router
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,10 +66,14 @@ async def lifespan(app: FastAPI):
     redis_ok = await _check_redis()
     await _check_models()
     log.info(
-        "AIDA backend ready  provider=%s  chat=%s  coder=%s  stt=%s  tts=%s  "
-        "embed=%s  db=postgres+pgvector  cache=%s",
+        "AIDA backend ready v%s  provider=%s  chat=%s  fallback=%s  thinking=%s/%s  "
+        "coder=%s  stt=%s  tts=%s  embed=%s  db=postgres+pgvector  cache=%s",
+        VERSION,
         settings.llm_provider,
         settings.chat_model,
+        settings.fallback_model or "-",
+        settings.gemini_thinking_level or "default",
+        settings.gemini_stt_thinking_level or "default",
         settings.coder_model,
         settings.gemini_stt_model,
         settings.gemini_tts_model,

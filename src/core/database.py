@@ -89,43 +89,33 @@ async def init_db() -> None:
 
 
 def _raise_pgvector_guide(original_exc: Exception) -> None:
-    """Raise a RuntimeError with clear Windows install instructions."""
-    guide = """
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- pgvector extension not found on your Postgres server
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    """Raise a RuntimeError explaining how to get pgvector onto the server.
 
-The official Postgres Windows installer does NOT include pgvector.
-You need to install it separately. Two options:
+    The message is environment-neutral (Docker/Coolify, managed, Windows) and
+    always includes the database's own error, because `CREATE EXTENSION` can
+    also fail for other reasons (e.g. missing privilege), not only "not installed".
+    """
+    guide = f"""
+============================================================
+ Could not enable the pgvector extension (CREATE EXTENSION vector)
+============================================================
+Database said: {original_exc}
 
-OPTION A — Pre-built Windows ZIP (fastest, no compiler needed)
-  1. Go to: https://github.com/pgvector/pgvector/releases
-  2. Download the ZIP matching your Postgres version (e.g. pgvector-pg18-win64.zip)
-  3. Extract it — you'll find:
-       vector.dll   → copy to  C:\\Program Files\\PostgreSQL\\18\\lib\\
-       vector.control → copy to  C:\\Program Files\\PostgreSQL\\18\\share\\extension\\
-       vector--*.sql  → copy to  C:\\Program Files\\PostgreSQL\\18\\share\\extension\\
-  4. Restart Postgres: Services → postgresql-x64-18 → Restart
-  5. Run:  python app.py
+If it says the extension is "not available": the Postgres SERVER has no
+pgvector installed. Plain Postgres images and the standard Windows installer
+do not include it. Use one that does:
 
-OPTION B — Build from source with Visual Studio
-  1. Install Visual Studio Build Tools (C++ workload)
-  2. Open "x64 Native Tools Command Prompt for VS"
-  3. Run:
-       set "PGROOT=C:\\Program Files\\PostgreSQL\\18"
-       git clone https://github.com/pgvector/pgvector.git
-       cd pgvector
-       nmake /F Makefile.win
-       nmake /F Makefile.win install
-  4. Restart Postgres service.
-  5. Run:  python app.py
+  * Docker / Coolify : run Postgres from the image  pgvector/pgvector:pg18
+                       (compose service or the database resource's image field).
+  * Local Windows    : build pgvector against your Postgres (needs Visual Studio
+                       C++ Build Tools) - steps: https://github.com/pgvector/pgvector#windows
+  * Hosted Postgres  : pick a provider/plan that lists pgvector, then enable it.
 
-OPTION C — Use Docker (recommended for production, skips all of this)
-  docker compose up -d
-  (The pgvector/pgvector:pg18 image has everything pre-installed.)
+If it says "permission denied": run once as a superuser in this database:
+    CREATE EXTENSION IF NOT EXISTS vector;
 
-See WINDOWS_SETUP.md for a full step-by-step with screenshots.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Then restart the app.
+============================================================
 """
     raise RuntimeError(guide) from original_exc
 

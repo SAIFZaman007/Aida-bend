@@ -42,7 +42,7 @@ from src.memory.models import Conversation, Message
 
 log = logging.getLogger("aida.chat")
 
-HISTORY_WINDOW = 8
+HISTORY_WINDOW = 20  # messages sent as context (10 exchanges) — long live conversations stay coherent
 
 # Keep strong references so fire-and-forget tasks are not garbage-collected.
 _bg_tasks: set[asyncio.Task] = set()

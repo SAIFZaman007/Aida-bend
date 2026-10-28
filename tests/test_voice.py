@@ -112,6 +112,28 @@ async def test_transcribe_sends_audio_and_strict_prompt(monkeypatch):
     assert seen["model"] == settings.gemini_stt_model
 
 
+async def test_stt_default_thinking_level_is_valid_for_gemini_3_8_flash():
+    # Production incident: "minimal" is rejected by gemini-3.8-flash (low|medium|high).
+    assert settings.gemini_stt_thinking_level in {"low", "medium", "high"}
+
+
+async def test_transcribe_self_heals_when_thinking_level_rejected(monkeypatch):
+    from google.genai import errors as genai_errors
+    gemini._NO_THINKING.clear()
+    seen = []
+    async def generate_content(*, model, contents, config):
+        seen.append(config.thinking_config)
+        if config.thinking_config is not None:
+            raise genai_errors.APIError(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                "message": "Thinking level MINIMAL is not supported for this model."}})
+        return types.SimpleNamespace(text="hello there")
+    monkeypatch.setattr(gemini, "get_client", lambda: types.SimpleNamespace(
+        aio=types.SimpleNamespace(models=types.SimpleNamespace(generate_content=generate_content))))
+    assert await stt.transcribe(b"\x00" * 3000, "audio/webm") == "hello there"
+    assert seen[0] is not None and seen[1] is None
+    gemini._NO_THINKING.clear()
+
+
 # ---------------- HTTP endpoints
 @pytest.fixture
 def client(fake_redis):

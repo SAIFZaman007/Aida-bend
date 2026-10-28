@@ -54,20 +54,33 @@ def clean_transcript(raw: str) -> str:
 
 async def transcribe(data: bytes, mime: str) -> str:
     client = gemini.get_client()
-    cfg = types.GenerateContentConfig(
-        system_instruction=_SYSTEM,
-        max_output_tokens=1024,
-        thinking_config=gemini.thinking_config(settings.gemini_stt_thinking_level),
-    )
-
-    async def call():
-        return await client.aio.models.generate_content(
-            model=settings.gemini_stt_model,
-            contents=[types.Part.from_bytes(data=data, mime_type=mime), "Transcribe this audio."],
-            config=cfg,
+    model = settings.gemini_stt_model
+    resp = None
+    for attempt in (1, 2):
+        cfg = types.GenerateContentConfig(
+            system_instruction=_SYSTEM,
+            max_output_tokens=1024,
+            thinking_config=gemini.thinking_config_for(model, settings.gemini_stt_thinking_level),
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
 
-    resp = await gemini.call_with_retry(call, timeout=30.0)
+        async def call(cfg=cfg):
+            return await client.aio.models.generate_content(
+                model=model,
+                contents=[types.Part.from_bytes(data=data, mime_type=mime), "Transcribe this audio."],
+                config=cfg,
+            )
+
+        try:
+            resp = await gemini.call_with_retry(call, timeout=20.0)
+            break
+        except AidaError as err:
+            cause = err.__cause__
+            # Self-heal: the model refused our thinking level -> retry without it.
+            if (attempt == 1 and cause is not None and gemini.is_thinking_rejected(cause)
+                    and gemini.mark_no_thinking(model)):
+                continue
+            raise
     try:
         raw = resp.text or ""
     except Exception:

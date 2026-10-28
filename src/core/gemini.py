@@ -46,11 +46,47 @@ async def aclose() -> None:
         _client = None
 
 
+# Models that rejected our thinking_level at runtime. Allowed levels differ per
+# model (e.g. gemini-3.8-flash has no "minimal"), so instead of failing every
+# request we drop thinking_config for that model once and keep working.
+_NO_THINKING: set[str] = set()
+
+
 def thinking_config(level: str) -> "types.ThinkingConfig | None":
     level = (level or "").strip().lower()
     if not level:
         return None
-    return types.ThinkingConfig(thinking_level=level)  # validated by the SDK enum
+    try:
+        return types.ThinkingConfig(thinking_level=level)  # validated by the SDK enum
+    except Exception:
+        log.error("Ignoring invalid thinking level %r (use low|medium|high)", level)
+        return None
+
+
+def thinking_config_for(model: str, level: str) -> "types.ThinkingConfig | None":
+    """thinking_config unless `model` already rejected it."""
+    return None if model in _NO_THINKING else thinking_config(level)
+
+
+def is_thinking_rejected(exc: BaseException) -> bool:
+    """True if the API refused the thinking level for this model (HTTP 400)."""
+    return (
+        isinstance(exc, genai_errors.APIError)
+        and getattr(exc, "code", None) == 400
+        and "thinking" in str(exc).lower()
+    )
+
+
+def mark_no_thinking(model: str) -> bool:
+    """Remember that `model` rejects thinking_config. True if newly recorded."""
+    if model in _NO_THINKING:
+        return False
+    _NO_THINKING.add(model)
+    log.warning(
+        "Model %r rejected the thinking level; continuing WITHOUT thinking_config. "
+        "Fix GEMINI_THINKING_LEVEL / GEMINI_STT_THINKING_LEVEL (valid for "
+        "gemini-3.8-flash: low, medium, high).", model)
+    return True
 
 
 def map_exception(exc: BaseException) -> AidaError:
