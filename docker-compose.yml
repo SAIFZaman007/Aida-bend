@@ -1,5 +1,5 @@
-version: "3.9"
-
+# Local development stack (Postgres + Redis). In production the platform
+# (e.g. Coolify) provides these and injects secrets as environment variables.
 services:
   postgres:
     image: pgvector/pgvector:pg18
@@ -7,10 +7,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: aida
-      POSTGRES_PASSWORD: aida
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aida}
       POSTGRES_DB: aida_db
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"   # loopback only — never expose the DB publicly
     volumes:
       - aida_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +24,7 @@ services:
     container_name: aida-redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"   # loopback only
     volumes:
       - aida_redisdata:/data
     healthcheck:

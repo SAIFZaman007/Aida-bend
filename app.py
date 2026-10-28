@@ -1,21 +1,26 @@
 """
-AIDA Backend — Application Entrypoint v2.0.0
+AIDA Backend — Application Entrypoint v2.1.0
 """
+import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src.chat.router import router as chat_router
-from src.core import redis_client
+from src.core import gemini, redis_client
 from src.core.config import settings
 from src.core.database import aclose as db_aclose
 from src.core.database import init_db
+from src.core.errors import http_detail, request_lang
 from src.core.llm import llm
 from src.voice.router import router as voice_router
+
+VERSION = "2.1.0"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,37 +39,41 @@ async def _check_redis() -> bool:
         return False
 
 
-async def _check_ollama() -> None:
-    if settings.is_anthropic:
+async def _check_models() -> None:
+    """Warn early (never fail startup) if the key or model IDs are wrong."""
+    if not settings.gemini_api_key:
+        log.warning(
+            "GEMINI_API_KEY is empty — chat, memory and voice will answer "
+            "'not configured' until it is set."
+        )
         return
-    import httpx
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{settings.ollama_base_url}/api/tags")
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}")
-            tags = {m["name"] for m in r.json().get("models", [])}
-            missing = [
-                m for m in [settings.chat_model, settings.coder_model, settings.embed_model]
-                if not any(t == m or t.startswith(m + ":") for t in tags)
-            ]
-            if missing:
-                log.warning("Ollama models not yet pulled: %s", missing)
-    except Exception as exc:
-        log.warning("Could not reach Ollama at %s: %s", settings.ollama_base_url, exc)
+    client = gemini.get_client()
+    wanted = {settings.gemini_embed_model}
+    if not settings.is_anthropic:
+        wanted.add(settings.gemini_chat_model)
+    for model in sorted(wanted):
+        try:
+            await asyncio.wait_for(client.aio.models.get(model=model), 8)
+        except Exception as exc:
+            err = gemini.map_exception(exc)
+            log.warning("Gemini model check failed for %r (%s): %s", model, err.code,
+                        err.detail[:200])
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     redis_ok = await _check_redis()
-    await _check_ollama()
+    await _check_models()
     log.info(
-        "AIDA backend ready  provider=%s  chat=%s  coder=%s  "
-        "db=postgres+pgvector  cache=%s",
+        "AIDA backend ready  provider=%s  chat=%s  coder=%s  stt=%s  tts=%s  "
+        "embed=%s  db=postgres+pgvector  cache=%s",
         settings.llm_provider,
         settings.chat_model,
         settings.coder_model,
+        settings.gemini_stt_model,
+        settings.gemini_tts_model,
+        settings.gemini_embed_model,
         "redis" if redis_ok else "DISABLED (Postgres fallback)",
     )
     yield
@@ -75,7 +84,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="A.I.D.A — Personal AI Assistant",
-    version="2.0.0",
+    version=VERSION,
     lifespan=lifespan,
 )
 
@@ -86,9 +95,29 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
-    expose_headers=["*"],
+    expose_headers=["X-Request-ID", "Retry-After"],
     max_age=600,
 )
+
+
+# ── Last-resort error handler ─────────────────────────────────────────
+# Unhandled errors would otherwise leak a stack trace AND, because they escape
+# the CORS middleware, surface in the browser as a misleading CORS failure.
+@app.exception_handler(Exception)
+async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
+    request_id = uuid.uuid4().hex[:12]
+    log.exception("unhandled error rid=%s %s %s", request_id, request.method, request.url.path)
+    headers = {"X-Request-ID": request_id}
+    origin = request.headers.get("origin")
+    if origin and origin in settings.cors_list:
+        headers.update({
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        })
+    detail = http_detail("internal", request_lang(request)) | {"request_id": request_id}
+    return JSONResponse(status_code=500, content={"detail": detail}, headers=headers)
+
 
 app.include_router(chat_router, prefix="/api")
 app.include_router(voice_router, prefix="/api")
@@ -113,10 +142,14 @@ async def health() -> dict:
     return {
         "status": "ok",
         "name": "AIDA",
-        "version": "2.0.0",
+        "version": VERSION,
         "provider": settings.llm_provider,
         "model": settings.chat_model,
         "coder_model": settings.coder_model,
+        "voice": {"stt": settings.gemini_stt_model, "tts": settings.gemini_tts_model},
+        "languages": ["bn", "en"],
+        # Reports whether a key is configured — never the key itself.
+        "ai_configured": bool(settings.gemini_api_key),
         "database": "postgres+pgvector",
         "cache": "redis" if redis_alive else "unavailable (DB fallback active)",
     }

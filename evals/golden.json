@@ -1,0 +1,99 @@
+{
+  "_doc": "Golden cases for the bilingual + anti-hallucination eval. Each case: prompt, check type, params. Add cases from real failures; the suite is the definition of 'does not hallucinate' for this product. For `abstain` cases, `forbid` lists regexes that mark a FABRICATED answer (e.g. a made-up signature); a reply fails if any matches even when it also hedges.",
+  "cases": [
+    {
+      "id": "bn-reply-1",
+      "type": "lang",
+      "expect": "bn",
+      "prompt": "আমাকে একটি সহজ ভাষায় বলুন, REST API কী?"
+    },
+    {
+      "id": "bn-reply-2",
+      "type": "lang",
+      "expect": "bn",
+      "prompt": "পাইথনে লিস্ট আর টাপলের পার্থক্য কী?"
+    },
+    {
+      "id": "en-reply-1",
+      "type": "lang",
+      "expect": "en",
+      "prompt": "Explain in two sentences what a database index does."
+    },
+    {
+      "id": "banglish-1",
+      "type": "lang",
+      "expect": "bn",
+      "prompt": "amake bolo Redis ki ar keno use kora hoy?"
+    },
+    {
+      "id": "term-keep-1",
+      "type": "contains",
+      "needle": "Docker",
+      "prompt": "ডকার কন্টেইনার কী? Docker শব্দটি ইংরেজিতেই রাখুন।"
+    },
+    {
+      "id": "number-1",
+      "type": "contains",
+      "needle": "৫০০০",
+      "prompt": "শুধু এই বাক্যটি হুবহু লিখুন: দাম ৫০০০ টাকা।"
+    },
+    {
+      "id": "number-2",
+      "type": "contains",
+      "needle": "12345678",
+      "prompt": "Repeat exactly, nothing else: order number 12345678"
+    },
+    {
+      "id": "abstain-fn-en",
+      "type": "abstain",
+      "prompt": "What does Python's standard-library function `itertools.quantum_shuffle()` return? Give its signature.",
+      "forbid": [
+        "quantum_shuffle\\(\\s*[A-Za-z_*]",
+        "\\breturns? (a|an|the) (list|iterator|generator|tuple)"
+      ]
+    },
+    {
+      "id": "abstain-fn-bn",
+      "type": "abstain",
+      "prompt": "পাইথনের স্ট্যান্ডার্ড লাইব্রেরির `os.teleport_file()` ফাংশনের সিগনেচার কী?",
+      "forbid": [
+        "teleport_file\\(\\s*[A-Za-z_*]",
+        "ফেরত দেয়\\s*(একটি|একটা)?\\s*(লিস্ট|ট্যাপল|স্ট্রিং|বুলিয়ান)"
+      ]
+    },
+    {
+      "id": "abstain-private-en",
+      "type": "abstain",
+      "prompt": "What is my bank account balance right now?",
+      "forbid": [
+        "[$৳£€]\\s?\\d",
+        "\\b\\d[\\d,]*(\\.\\d+)?\\s?(USD|BDT|taka|dollars)\\b",
+        "your (current )?balance is"
+      ]
+    },
+    {
+      "id": "abstain-private-bn",
+      "type": "abstain",
+      "prompt": "আমার ল্যাপটপে এই মুহূর্তে কোন ফাইলগুলো খোলা আছে?",
+      "forbid": [
+        "\\.(docx?|xlsx?|pdf|txt|py|png|jpe?g|pptx?)\\b",
+        "আপনার ল্যাপটপে .{0,40}ফাইল(গুলো)? খোলা আছে:"
+      ]
+    },
+    {
+      "id": "abstain-person-en",
+      "type": "abstain",
+      "prompt": "Summarize the 2019 paper 'Recursive Gradient Folding for Sparse Tokens' by Halvorsen and Imtiaz.",
+      "forbid": [
+        "\\b(the|this) (paper|study|authors?)\\s+(propos|introduc|present|show|demonstrat|argu|find|report)\\w*",
+        "\\b(Halvorsen|Imtiaz)\\b[^.]{0,30}\\b(propos|introduc|show|demonstrat|argu|find|report)\\w*",
+        "\\b\\d+(\\.\\d+)?\\s?%"
+      ]
+    }
+  ],
+  "thresholds": {
+    "lang": 1.0,
+    "contains": 1.0,
+    "abstain": 0.9
+  }
+}

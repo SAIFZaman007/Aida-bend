@@ -1,28 +1,30 @@
+# Pins below were resolved TOGETHER by pip on Python 3.11 and the full test suite
+# was run against them. Change one, re-run `pip install -r requirements.txt`
+# and `pytest`.
+
 # --- Core API ---
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-pydantic==2.10.4
-pydantic-settings==2.7.1
-python-dotenv==1.0.1
- 
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+pydantic-settings==2.16.1
+python-dotenv==1.2.4
+
 # --- Database: Postgres + pgvector ---
-sqlalchemy==2.0.36
-asyncpg==0.30.0
-pgvector==0.3.6
- 
-# --- Cache / pub-sub: Redis 8 ---
-redis==5.2.1
- 
-# --- LLM providers ---
+# [asyncio] is REQUIRED since SQLAlchemy 2.1 (it no longer installs greenlet by itself).
+sqlalchemy[asyncio]==2.1.6
+asyncpg==0.32.0
+pgvector==0.5.1
+
+# --- Cache / rate limiting: Redis ---
+redis==8.1.0
+
+# --- AI: Google Gemini (chat, embeddings, speech-to-text, text-to-speech) ---
+# TTS uses the Interactions API (needs >= 2.25.0).
+google-genai==2.33.0
 httpx==0.28.1
-anthropic==0.42.0
- 
-# --- Voice: TTS (Piper) ---
-piper-tts==1.4.2
- 
-# --- Voice: STT (faster-whisper) ---
-requests==2.32.3
-faster-whisper==1.1.0
- 
+
+# --- Optional alternative chat provider (LLM_PROVIDER=anthropic) ---
+anthropic==2.3.0
+
 # --- Utilities ---
-python-multipart==0.0.20
+python-multipart==0.0.32

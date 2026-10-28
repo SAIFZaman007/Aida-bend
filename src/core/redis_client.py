@@ -37,8 +37,14 @@ _redis: "redis_asyncio.Redis | None" = None
 def get_redis() -> "redis_asyncio.Redis":
     global _redis
     if _redis is None:
+        # Short socket timeouts: Redis is an optimisation, never a reason for a
+        # request to hang (every caller already degrades gracefully).
         _redis = redis_asyncio.from_url(
-            settings.redis_url, encoding="utf-8", decode_responses=True
+            settings.redis_url,
+            encoding="utf-8",
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
         )
     return _redis
 
@@ -74,8 +80,13 @@ async def cache_append_messages(conversation_id: str, *messages: dict) -> None:
         r = get_redis()
         key = _HIST_KEY.format(conversation_id=conversation_id)
         pipe = r.pipeline()
+        # RPUSHX appends ONLY if the list already exists. A plain RPUSH on a
+        # cold/expired key created a one-message list that the next read
+        # mistook for the full history — the conversation silently "forgot"
+        # everything earlier. With RPUSHX a missing key stays missing and is
+        # rebuilt in full from Postgres on the next read.
         for m in messages:
-            pipe.rpush(key, json.dumps(m))
+            pipe.rpushx(key, json.dumps(m))
         pipe.ltrim(key, -_HIST_MAX, -1)
         pipe.expire(key, settings.redis_history_ttl)
         await pipe.execute()

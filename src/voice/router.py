@@ -1,168 +1,106 @@
 """Voice endpoints — speech-to-text and natural text-to-speech with timing marks.
 
-  POST /voice/transcribe   : audio blob -> text   (faster-whisper, local, free)
-  POST /voice/speak        : text -> WAV audio     (Piper, local, natural)
+  POST /voice/transcribe   : audio blob -> text   (Gemini, Bengali + English)
+  POST /voice/speak        : text -> WAV audio     (Gemini TTS)
   POST /voice/speak_marks  : text -> {audio (base64 WAV), marks: [...]}
                               — powers the Real-Time Reading Progress Highlighter
 
-v2 changes:
- • TEXT NORMALIZATION: both /speak and /speak_marks run text through
-   text_normalize.normalize_for_speech() first, fixing the robotic reading of
-   things like "11111111", "e.g.", and other abbreviations/digit runs.
- • FASTER STT: whisper compute type, beam size, and model size are now
-   configurable (defaults tuned for low latency: int8, beam=1) and the model
-   is warmed up at import time in a background thread so the FIRST request
-   isn't the one that pays the multi-second model-load cost.
- • TIMING MARKS: /voice/speak_marks runs Piper per-sentence and returns
-   word-level timestamps (estimated from phoneme/audio duration) alongside a
-   single concatenated WAV, so the frontend highlighter can move in lockstep
-   with playback — including for the webspeech fallback via SpeechSynthesis
-   boundary events (handled client-side).
+v2.1: the local faster-whisper / Piper engines were replaced by Gemini so the
+assistant can listen and speak Bengali as well as English. REQUEST AND RESPONSE
+SHAPES ARE UNCHANGED, so the frontend lip-sync and highlighter keep working.
 
-STT decodes from memory (BytesIO) so it works on Windows (no temp-file lock)
-and never 500s. TTS uses Piper if a voice model is present for the requested
-gender; otherwise it returns 503 and the frontend uses the browser voice.
+Failure semantics (preserved from v2):
+  • /transcribe never returns a 5xx for provider problems — it answers 200 with
+    empty text + an `error` code so the hands-free loop just keeps listening and
+    no phantom CORS error appears.
+  • /speak and /speak_marks answer 503 with a coded body when synthesis is
+    unavailable, which makes the frontend fall back to the browser voice.
 """
-import io
-import os
-import threading
-import wave
+import base64
+import logging
+from typing import Literal
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.core.config import settings
+from src.core.errors import AidaError, http_detail, request_lang
+from src.core.ratelimit import limit_stt, limit_tts
+from src.core.text import detect_language, dominant_language
+from src.voice import stt, tts
 from src.voice.text_normalize import normalize_for_speech
 
+log = logging.getLogger("aida.voice")
 router = APIRouter()
 
-# ----------------------------------------------------------------- STT (Whisper)
-_whisper = None
-_whisper_lock = threading.Lock()
+MIN_AUDIO_BYTES = 1200  # shorter than this is a click/blip, not speech
 
 
-def _load_whisper():
-    global _whisper
-    from faster_whisper import WhisperModel
-
-    with _whisper_lock:
-        if _whisper is None:
-            _whisper = WhisperModel(
-                settings.whisper_model,
-                device="auto",
-                compute_type=settings.whisper_compute_type,
-            )
-    return _whisper
-
-
-def _get_whisper():
-    return _whisper or _load_whisper()
-
-
-# Warm up the model in the background on import so the first transcribe call
-# doesn't pay multi-second model-load latency (a big chunk of the "voice
-# command takes a long time" complaint).
-threading.Thread(target=_load_whisper, daemon=True).start()
-
-
-MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB cap — guards against memory abuse
-
-
-@router.post("/voice/transcribe")
-async def transcribe(file: UploadFile = File(...)) -> dict:
-    data = await file.read()
-    if not data or len(data) < 1200:
-        return {"text": "", "language": "en"}
-    if len(data) > MAX_AUDIO_BYTES:
-        return {"text": "", "language": "en", "error": "audio too large"}
+# ----------------------------------------------------------------- STT
+@router.post("/voice/transcribe", dependencies=[Depends(limit_stt)])
+async def transcribe(request: Request, file: UploadFile = File(...)) -> dict:
+    lang = request_lang(request)
+    data = await file.read(settings.max_audio_bytes + 1)
+    if len(data) > settings.max_audio_bytes:
+        raise HTTPException(413, detail=http_detail("too_large", lang))
+    if len(data) < MIN_AUDIO_BYTES:
+        return {"text": "", "language": "unknown"}
     try:
-        segments, info = _get_whisper().transcribe(
-            io.BytesIO(data),
-            beam_size=settings.whisper_beam_size,
-            vad_filter=True,
-            condition_on_previous_text=False,
-        )
-        text = " ".join(seg.text.strip() for seg in segments).strip()
-        return {"text": text, "language": info.language}
-    except Exception as exc:  # never 500 -> never a phantom CORS error
-        return {"text": "", "language": "en", "error": str(exc)}
+        text = await stt.transcribe(data, stt.safe_mime(file.content_type))
+    except AidaError as err:
+        log.warning("transcribe failed code=%s detail=%s", err.code, err.detail[:200])
+        return {"text": "", "language": "unknown", "error": err.code,
+                "message": err.message(lang)}
+    except Exception:
+        log.exception("transcribe crashed")
+        return {"text": "", "language": "unknown", "error": "internal",
+                "message": AidaError("internal").message(lang)}
+    return {"text": text, "language": detect_language(text)}
 
 
-# ----------------------------------------------------------------- TTS (Piper)
+# ----------------------------------------------------------------- TTS
 class SpeakRequest(BaseModel):
-    text: str
-    gender: str = "female"
+    text: str = Field(max_length=20_000)
+    gender: Literal["female", "male"] = "female"
 
 
-_piper_cache: dict[str, object] = {}
+class SpeakMarksRequest(SpeakRequest):
+    pass
 
 
-def _voice_path(gender: str) -> str | None:
-    """Resolve the model path for a gender; None if it isn't on disk."""
-    path = settings.piper_voice_male if gender == "male" else settings.piper_voice_female
-    if path and os.path.exists(path) and os.path.exists(path + ".json"):
-        return path
-    return None
-
-
-def _get_piper(gender: str):
-    path = _voice_path(gender)
-    if path is None:
-        return None
-    if path not in _piper_cache:
-        from piper.voice import PiperVoice  # imported lazily
-
-        _piper_cache[path] = PiperVoice.load(path)
-    return _piper_cache[path]
-
-
-def _synth_wav(voice, text: str) -> bytes:
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        # piper-tts 1.x uses synthesize_wav(text, wav_file); older builds expose
-        # synthesize(text, wav_file). Support both so the version doesn't matter.
-        if hasattr(voice, "synthesize_wav"):
-            voice.synthesize_wav(text, wf)
-        else:
-            voice.synthesize(text, wf)
-    return buf.getvalue()
-
-
-@router.post("/voice/speak")
-async def speak(req: SpeakRequest):
-    try:
-        voice = _get_piper(req.gender)
-    except Exception as exc:
-        raise HTTPException(503, f"Piper unavailable: {exc}")
-    if voice is None:
-        raise HTTPException(503, "Piper voice model not found (run download_voices.py)")
-
-    text = normalize_for_speech((req.text or "").strip())
+async def _synth(req: SpeakRequest, request: Request) -> tuple[bytes, float, str]:
+    lang = request_lang(request)
+    raw_text = (req.text or "").strip()
+    if not raw_text:
+        raise HTTPException(400, detail={"code": "bad_request", "message": "Empty text"})
+    if len(raw_text) > settings.max_tts_chars:
+        raise HTTPException(413, detail=http_detail("too_large", lang))
+    text = normalize_for_speech(raw_text, dominant_language(raw_text))
     if not text:
-        raise HTTPException(400, "Empty text")
+        raise HTTPException(400, detail={"code": "bad_request", "message": "Empty text"})
+    try:
+        wav, duration = await tts.synthesize(text, req.gender)
+    except AidaError as err:
+        log.warning("speak failed code=%s detail=%s", err.code, err.detail[:200])
+        raise HTTPException(503, detail=http_detail(err.code, lang))
+    except Exception:
+        log.exception("speak crashed")
+        raise HTTPException(503, detail=http_detail("unavailable", lang))
+    return wav, duration, text
 
-    return Response(content=_synth_wav(voice, text), media_type="audio/wav")
+
+@router.post("/voice/speak", dependencies=[Depends(limit_tts)])
+async def speak(req: SpeakRequest, request: Request):
+    wav, _, _ = await _synth(req, request)
+    return Response(content=wav, media_type="audio/wav")
 
 
 # -------------------------------------------------- TTS with timing marks (highlighter)
-class SpeakMarksRequest(BaseModel):
-    text: str
-    gender: str = "female"
-
-
-def _wav_duration_seconds(wav_bytes: bytes) -> float:
-    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-        frames = wf.getnframes()
-        rate = wf.getframerate() or settings.piper_sample_rate
-        return frames / float(rate)
-
-
 def _split_words_with_offsets(text: str) -> list[tuple[str, int, int]]:
     """Return (word, start_char, end_char) for each word in `text`."""
     words: list[tuple[str, int, int]] = []
-    i = 0
-    n = len(text)
+    i, n = 0, len(text)
     while i < n:
         while i < n and text[i].isspace():
             i += 1
@@ -174,59 +112,32 @@ def _split_words_with_offsets(text: str) -> list[tuple[str, int, int]]:
     return words
 
 
-@router.post("/voice/speak_marks")
-async def speak_marks(req: SpeakMarksRequest):
-    """Synthesize audio for `text` and return word-level timing marks.
+def build_marks(text: str, duration: float) -> list[dict]:
+    """Word timings estimated proportionally to word length over the audio.
 
-    Response: {"audio": "<base64 wav>", "duration": <seconds>,
-               "marks": [{"word": str, "start": float, "end": float,
-                          "char_start": int, "char_end": int}, ...]}
-
-    `start`/`end` are seconds from the beginning of the returned audio.
-    Word durations are allocated proportionally to character length within
-    each sentence's audio span — Piper doesn't expose true phoneme
-    timestamps, but this estimate is smooth and accurate enough for a
-    teleprompter-style highlight, and stays perfectly in sync because it's
-    derived from the SAME audio the user hears.
+    The TTS API exposes no word timestamps; this estimate is derived from the
+    SAME audio the user hears, so it cannot drift. Offsets index into `text`
+    (the spoken text); the frontend re-maps timing onto the displayed text.
     """
-    import base64
-
-    try:
-        voice = _get_piper(req.gender)
-    except Exception as exc:
-        raise HTTPException(503, f"Piper unavailable: {exc}")
-    if voice is None:
-        raise HTTPException(503, "Piper voice model not found (run download_voices.py)")
-
-    raw_text = (req.text or "").strip()
-    if not raw_text:
-        raise HTTPException(400, "Empty text")
-
-    text = normalize_for_speech(raw_text)
-    wav_bytes = _synth_wav(voice, text)
-    duration = _wav_duration_seconds(wav_bytes)
-
     words = _split_words_with_offsets(text)
     total_chars = sum(len(w) for w, _, _ in words) or 1
-
-    marks = []
-    t = 0.0
+    marks, t = [], 0.0
     for word, cs, ce in words:
         span = duration * (len(word) / total_chars)
-        marks.append(
-            {
-                "word": word,
-                "start": round(t, 4),
-                "end": round(t + span, 4),
-                "char_start": cs,
-                "char_end": ce,
-            }
-        )
+        marks.append({"word": word, "start": round(t, 4), "end": round(t + span, 4),
+                      "char_start": cs, "char_end": ce})
         t += span
+    return marks
 
+
+@router.post("/voice/speak_marks", dependencies=[Depends(limit_tts)])
+async def speak_marks(req: SpeakMarksRequest, request: Request):
+    """Response: {"audio": "<base64 wav>", "duration": <seconds>, "text": str,
+                  "marks": [{"word","start","end","char_start","char_end"}...]}"""
+    wav, duration, text = await _synth(req, request)
     return {
-        "audio": base64.b64encode(wav_bytes).decode("ascii"),
+        "audio": base64.b64encode(wav).decode("ascii"),
         "duration": round(duration, 4),
         "text": text,
-        "marks": marks,
+        "marks": build_marks(text, duration),
     }

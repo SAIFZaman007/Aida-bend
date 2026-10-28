@@ -1,45 +1,43 @@
-"""Text normalization for natural-sounding speech.
+"""Text normalization for natural-sounding speech (Bengali + English).
 
-Fixes the "Avatar's voice glitches / too robotic" issue:
-  • Repeated characters/digits ("11111111", "aaaaah") are collapsed or spoken
-    as a group ("eleven million..." no — instead we say "1 repeated 8 times"
-    is wrong too; for digit runs we read them as a NUMBER, e.g. "11111111" ->
-    "eleven million one hundred eleven thousand one hundred eleven", which is
-    how a human would read a long number aloud, not digit-by-digit).
-  • Abbreviations and acronyms (e.g. "e.g.", "i.e.", "etc.", "API", "URL") are
-    expanded to their spoken form instead of being read letter-by-letter or
-    spelled out mechanically.
-  • Common symbols (&, %, /, +, =, #, @) get spoken-word equivalents.
+Mirrored by frontend/src/lib/text.js — the two MUST stay behaviourally
+identical; tests/vectors/speech_vectors.json is executed by BOTH test suites.
 
-This module is used by both:
-  - the backend Piper TTS endpoint (so server-side audio sounds natural), and
-  - is mirrored by the frontend's sanitizeForSpeech() for the browser
-    (webspeech) voice and for generating the highlighter's spoken-text view.
-
-Keep the two implementations in sync if you add new rules.
+Rules, and why they are language-aware (v2.1):
+  • Stutter collapse ("soooo", "!!!", "go go go go") — never touches digits of
+    ANY script. (Old JS version collapsed Bengali "৫০০০" into "৫০", changing
+    the number that was spoken.)
+  • Repeated-WORD collapse is ASCII-only: it must not delete deliberate Bengali
+    repetition ("ধীরে ধীরে ধীরে").
+  • English-only expansions (digit runs -> English cardinals, "e.g.", acronym
+    letter-spelling, "percent"/"plus"...) apply ONLY when the text is
+    English-dominant. Inside a Bengali sentence they used to inject English
+    words ("১০০ percent", "twelve million…").
+  • Bengali symbols are spoken in Bengali (% -> শতাংশ, & -> এবং, ...).
+  • Digit runs that are really identifiers (leading zero, or 11+ digits: phone
+    numbers, IDs) are read digit by digit, not as one huge cardinal.
 """
 import re
 
-# --- Abbreviation / acronym expansions -------------------------------------
-# Order matters: longer / more specific patterns first.
+from src.core.text import dominant_language
+
+# --- English abbreviation / acronym expansions -----------------------------
 _ABBREV_MAP: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\be\.g\.,?\s*", re.IGNORECASE), "for example, "),
-    (re.compile(r"\bi\.e\.,?\s*", re.IGNORECASE), "that is, "),
-    (re.compile(r"\betc\.", re.IGNORECASE), "et cetera"),
-    (re.compile(r"\bvs\.", re.IGNORECASE), "versus"),
-    (re.compile(r"\bw/\b", re.IGNORECASE), "with"),
-    (re.compile(r"\bw/o\b", re.IGNORECASE), "without"),
-    (re.compile(r"\bapprox\.", re.IGNORECASE), "approximately"),
-    (re.compile(r"\bno\.\s*(?=\d)", re.IGNORECASE), "number "),
-    (re.compile(r"\bDr\.", re.IGNORECASE), "Doctor"),
-    (re.compile(r"\bMr\.", re.IGNORECASE), "Mister"),
-    (re.compile(r"\bMrs\.", re.IGNORECASE), "Missus"),
-    (re.compile(r"\bMs\.", re.IGNORECASE), "Miss"),
-    (re.compile(r"\bSt\.", re.IGNORECASE), "Street"),
+    (re.compile(r"\be\.g\.,?\s*", re.IGNORECASE | re.ASCII), "for example, "),
+    (re.compile(r"\bi\.e\.,?\s*", re.IGNORECASE | re.ASCII), "that is, "),
+    (re.compile(r"\betc\.", re.IGNORECASE | re.ASCII), "et cetera"),
+    (re.compile(r"\bvs\.", re.IGNORECASE | re.ASCII), "versus"),
+    (re.compile(r"\bw/o\b", re.IGNORECASE | re.ASCII), "without"),
+    (re.compile(r"\bw/\b", re.IGNORECASE | re.ASCII), "with"),
+    (re.compile(r"\bapprox\.", re.IGNORECASE | re.ASCII), "approximately"),
+    (re.compile(r"\bno\.\s*(?=\d)", re.IGNORECASE | re.ASCII), "number "),
+    (re.compile(r"\bDr\.", re.ASCII), "Doctor"),
+    (re.compile(r"\bMr\.", re.ASCII), "Mister"),
+    (re.compile(r"\bMrs\.", re.ASCII), "Missus"),
+    (re.compile(r"\bMs\.", re.ASCII), "Miss"),
+    (re.compile(r"\bSt\.", re.ASCII), "Street"),
 ]
 
-# Acronyms that should be pronounced as words ("API" -> "A P I" reads okay,
-# but a few common ones sound better spoken naturally).
 _ACRONYM_WORDS: dict[str, str] = {
     "ASAP": "as soon as possible",
     "FAQ": "F A Q",
@@ -55,46 +53,27 @@ _ACRONYM_WORDS: dict[str, str] = {
     "AI": "A I",
 }
 
-# --- Symbol -> word ----------------------------------------------------------
-_SYMBOL_MAP: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\s*&\s*"), " and "),
-    (re.compile(r"\s*%\s*"), " percent "),
-    (re.compile(r"\s*=\s*"), " equals "),
-    (re.compile(r"\s*\+\s*"), " plus "),
-    (re.compile(r"#(\d+)"), r"number \1"),
-    (re.compile(r"@"), " at "),
-]
+# --- Symbol -> word, per language -------------------------------------------
+_SYMBOLS = {
+    "en": {"&": "and", "%": "percent", "=": "equals", "+": "plus",
+           "num": "number", "@": "at"},
+    "bn": {"&": "এবং", "%": "শতাংশ", "=": "সমান", "+": "প্লাস",
+           "num": "নম্বর", "@": "অ্যাট"},
+}
 
-# Long digit-runs (4+ digits) get read as a number rather than letter-by-letter.
-_DIGIT_RUN_RE = re.compile(r"\b\d{4,}\b")
-
-# A run of 3+ identical non-digit characters ("soooo", "!!!", "----") is
-# collapsed to a single character so it isn't spelled out.
+_ASCII_DIGIT_RUN_RE = re.compile(r"\b[0-9]{4,}\b", re.ASCII)
+# 3+ identical non-digit, non-space chars. \d is Unicode (all scripts' digits).
 _REPEATED_CHAR_RE = re.compile(r"([^\d\s])\1{2,}")
-
-# A run of 3+ repeated short words/tokens ("go go go go") is collapsed to one.
-_REPEATED_WORD_RE = re.compile(r"\b(\w+)(?:\s+\1\b){2,}", re.IGNORECASE)
-
-
-def _spell_number(match: "re.Match[str]") -> str:
-    """Render a long digit run as a spoken cardinal number."""
-    digits = match.group(0)
-    try:
-        n = int(digits)
-    except ValueError:
-        return digits
-    return _cardinal(n)
-
+# ASCII words only (see module docstring).
+_REPEATED_WORD_RE = re.compile(r"\b([A-Za-z0-9_]+)(?:\s+\1\b){2,}", re.IGNORECASE | re.ASCII)
+_ACRONYM_RE = re.compile(r"\b[A-Z]{2,6}\b", re.ASCII)
 
 _ONES = [
     "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
     "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
     "sixteen", "seventeen", "eighteen", "nineteen",
 ]
-_TENS = [
-    "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
-    "eighty", "ninety",
-]
+_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
 _SCALES = ["", "thousand", "million", "billion", "trillion"]
 
 
@@ -133,40 +112,37 @@ def _cardinal(n: int) -> str:
     return " ".join(words)
 
 
-def normalize_for_speech(text: str) -> str:
-    """Make text read naturally by a TTS voice.
+def _spell_number(match: "re.Match[str]") -> str:
+    digits = match.group(0)
+    # Identifiers (phone numbers, IDs): leading zero or very long -> digit by digit.
+    if digits[0] == "0" or len(digits) >= 11:
+        return " ".join(digits)
+    return _cardinal(int(digits))
 
-    Collapses repeated characters/words, expands abbreviations and common
-    acronyms, converts symbols to words, and reads long digit runs as numbers
-    instead of digit-by-digit.
-    """
+
+def normalize_for_speech(text: str, lang: str | None = None) -> str:
+    """Make text read naturally by a TTS voice. `lang` ('bn'|'en') is detected
+    from the text when omitted."""
     if not text:
         return ""
+    lang = lang or dominant_language(text)
     t = text
 
-    # Collapse stuttered characters/words first ("11111111" handled below by
-    # the digit-run rule; this targets things like "nooo" or "go go go go").
     t = _REPEATED_CHAR_RE.sub(lambda m: m.group(1), t)
     t = _REPEATED_WORD_RE.sub(lambda m: m.group(1), t)
 
-    # Long digit runs -> spoken numbers ("11111111" -> "eleven million ...").
-    t = _DIGIT_RUN_RE.sub(_spell_number, t)
+    if lang == "en":
+        t = _ASCII_DIGIT_RUN_RE.sub(_spell_number, t)
+        for pattern, repl in _ABBREV_MAP:
+            t = pattern.sub(repl, t)
+        t = _ACRONYM_RE.sub(lambda m: _ACRONYM_WORDS.get(m.group(0), m.group(0)), t)
 
-    # Abbreviations.
-    for pattern, repl in _ABBREV_MAP:
-        t = pattern.sub(repl, t)
+    sym = _SYMBOLS[lang]
+    t = re.sub(r"\s*&\s*", f" {sym['&']} ", t)
+    t = re.sub(r"\s*%\s*", f" {sym['%']} ", t)
+    t = re.sub(r"\s*=\s*", f" {sym['=']} ", t)
+    t = re.sub(r"\s*\+\s*", f" {sym['+']} ", t)
+    t = re.sub(r"#(\d+)", lambda m: f"{sym['num']} {m.group(1)}", t)
+    t = t.replace("@", f" {sym['@']} ")
 
-    # Whole-word acronyms.
-    def _acro(m: "re.Match[str]") -> str:
-        word = m.group(0)
-        return _ACRONYM_WORDS.get(word.upper(), word)
-
-    t = re.sub(r"\b[A-Z]{2,6}\b", _acro, t)
-
-    # Symbols -> words.
-    for pattern, repl in _SYMBOL_MAP:
-        t = pattern.sub(repl, t)
-
-    # Tidy whitespace.
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
+    return re.sub(r"\s+", " ", t).strip()

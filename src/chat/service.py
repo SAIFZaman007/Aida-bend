@@ -1,29 +1,30 @@
 """Chat orchestration.
 
 Per turn:
-  1. Load conversation (project + persona).
-  2. Persist the user message immediately (Postgres) + push to Redis history.
-  3. Best-effort, time-boxed memory recall (pgvector ANN; returns short strings).
-  4. Build [system persona] + [recalled context] + [recent history] + [new turn].
-  5. Stream the reply (model chosen by persona — chat vs. coder), segmenting it
-     into sentences as it goes so the frontend can drive the real-time reading
-     highlighter and TTS from the same boundaries.
-  6. Persist the reply; store the exchange in memory in the BACKGROUND.
+  1. Load the conversation (project + persona).
+  2. Read PRIOR history (Redis first, Postgres fallback).
+  3. Persist the user message (Postgres) and push it to the Redis cache.
+  4. Best-effort, time-boxed, relevance-filtered memory recall.
+  5. Build [system persona] + [recalled notes] + [prior history] + [new turn].
+  6. Stream the reply, segmenting it into sentences (Bengali + English aware) so
+     the frontend can speak and highlight from the SAME boundaries.
+  7. Persist the reply — even a partial one if the client disconnects or the
+     provider fails mid-stream — and store the exchange in memory in the
+     BACKGROUND.
 
-v2 changes:
- • HISTORY now comes from Redis first (cache_get_history); Postgres is the
-   fallback/rebuild path. This removes a DB round trip from the hot path and
-   is the other half of the fix for "sloppy after bulk session usage".
- • Model routing: stream_chat(..., persona=conv.persona) so developer /
-   architect / coder turns run on the coder model (qwen3-coder by default).
- • SENTENCE SEGMENTS: stream_reply now yields dicts {"type": "token", "t": ...}
-   and {"type": "sentence", "text": ..., "index": N} as sentence boundaries are
-   crossed. The router turns these into SSE frames; the frontend uses the
-   sentence events to align the avatar's speech with on-screen highlighting
-   (Real-Time Reading Progress Highlighter).
+v2.1 fixes (all reproduced with tests/test_history.py):
+ • The new user message used to be sent to the model TWICE per turn (it was
+   saved + cached before history was read, then appended again).
+ • After a Redis restart or the 6 h TTL, the whole earlier conversation was
+   dropped (a cold cache was "rebuilt" from the single just-appended message).
+ • A dropped connection left a user turn with no reply, producing consecutive
+   user turns that providers reject or misread; partial replies are now saved.
+ • Sentence segmentation lives in core/text.py (understands "।", decimals,
+   times, URLs, code fences) and emits `code` flags so code is never read aloud.
+ • Recalled memory is filtered by relevance and presented as unverified notes.
 """
 import asyncio
-import re
+import logging
 from collections.abc import AsyncGenerator
 
 from sqlalchemy import select
@@ -31,15 +32,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agents.prompts import system_prompt
 from src.core import redis_client
+from src.core.config import settings
 from src.core.database import SessionLocal
+from src.core.errors import AidaError
 from src.core.llm import llm
+from src.core.text import SentenceSegmenter, detect_language
 from src.memory import service as memory
 from src.memory.models import Conversation, Message
 
-HISTORY_WINDOW = 8
-RECALL_TIMEOUT = 0.5
+log = logging.getLogger("aida.chat")
 
-_SENTENCE_RE = re.compile(r"[^.!?:\n]*[.!?:\n]+")
+HISTORY_WINDOW = 8
+
+# Keep strong references so fire-and-forget tasks are not garbage-collected.
+_bg_tasks: set[asyncio.Task] = set()
+
+_BN_NOTE = (
+    "The user's latest message is written in Bengali script: reply in natural "
+    "Bengali script."
+)
 
 
 async def _recent_history_db(session: AsyncSession, conversation_id: str) -> list[dict]:
@@ -58,6 +69,7 @@ async def _recent_history_db(session: AsyncSession, conversation_id: str) -> lis
 
 
 async def _recent_history(session: AsyncSession, conversation_id: str) -> list[dict]:
+    """PRIOR turns only. Must be called BEFORE the new user message is saved."""
     cached = await redis_client.cache_get_history(conversation_id)
     if cached is not None:
         return cached[-HISTORY_WINDOW:]
@@ -67,13 +79,17 @@ async def _recent_history(session: AsyncSession, conversation_id: str) -> list[d
 
 
 async def build_messages(
-    session: AsyncSession, conv: Conversation, user_text: str
+    session: AsyncSession, conv: Conversation, user_text: str, history: list[dict]
 ) -> list[dict]:
-    messages: list[dict] = [{"role": "system", "content": system_prompt(conv.persona)}]
+    persona_prompt = system_prompt(conv.persona)
+    if detect_language(user_text) == "bn":
+        persona_prompt += " " + _BN_NOTE
+    messages: list[dict] = [{"role": "system", "content": persona_prompt}]
 
     try:
         chunks = await asyncio.wait_for(
-            memory.recall(session, conv.project_id, user_text, k=3), RECALL_TIMEOUT
+            memory.recall(session, conv.project_id, user_text),
+            settings.memory_recall_timeout,
         )
     except Exception:
         chunks = []
@@ -82,14 +98,17 @@ async def build_messages(
         messages.append(
             {
                 "role": "system",
-                "content": "Relevant context from earlier work on this project:\n"
-                + recalled,
+                "content": (
+                    "Notes from earlier work on this project. They may be outdated "
+                    "or wrong: do not present them as verified fact, use them only "
+                    "if clearly relevant, and prefer the user's latest message if "
+                    "they conflict:\n" + recalled
+                ),
             }
         )
 
-    for m in await _recent_history(session, conv.id):
+    for m in history:
         messages.append({"role": m["role"], "content": m["content"]})
-
     messages.append({"role": "user", "content": user_text})
     return messages
 
@@ -100,7 +119,18 @@ async def _remember_bg(project_id: str, text: str) -> None:
         async with SessionLocal() as s:
             await memory.remember(s, project_id, text, source="message")
     except Exception:
-        pass
+        log.debug("background memory write failed", exc_info=True)
+
+
+async def _persist_assistant(conversation_id: str, reply: str) -> None:
+    """Save the assistant turn on a FRESH session (the request session may be
+    closing when a client disconnects) and mirror it into the Redis cache."""
+    async with SessionLocal() as s:
+        s.add(Message(conversation_id=conversation_id, role="assistant", content=reply))
+        await s.commit()
+    await redis_client.cache_append_messages(
+        conversation_id, {"role": "assistant", "content": reply}
+    )
 
 
 async def stream_reply(
@@ -108,48 +138,56 @@ async def stream_reply(
 ) -> AsyncGenerator[dict, None]:
     conv = await session.get(Conversation, conversation_id)
     if conv is None:
-        raise ValueError("Conversation not found")
+        raise AidaError("not_found", conversation_id)
+    conv_id, project_id, persona = conv.id, conv.project_id, conv.persona
 
-    user_msg = Message(conversation_id=conv.id, role="user", content=user_text)
-    session.add(user_msg)
+    # 1) PRIOR history first — never include the message we are about to send.
+    history = await _recent_history(session, conv_id)
+
+    # 2) Persist the user turn.
+    session.add(Message(conversation_id=conv_id, role="user", content=user_text))
     await session.commit()
     await redis_client.cache_append_messages(
-        conv.id, {"role": "user", "content": user_text}
+        conv_id, {"role": "user", "content": user_text}
     )
 
-    messages = await build_messages(session, conv, user_text)
+    messages = await build_messages(session, conv, user_text, history)
 
     parts: list[str] = []
-    buffer = ""
+    segmenter = SentenceSegmenter()
     sentence_index = 0
+    completed = False
 
-    async for piece in llm.stream_chat(messages, persona=conv.persona):
-        parts.append(piece)
-        buffer += piece
-        yield {"type": "token", "t": piece}
-
-        while True:
-            m = _SENTENCE_RE.match(buffer)
-            if not m:
-                break
-            sentence = m.group(0)
-            if not sentence.strip():
-                buffer = buffer[m.end():]
-                continue
-            yield {"type": "sentence", "index": sentence_index, "text": sentence}
+    def sentence_events(segments) -> list[dict]:
+        nonlocal sentence_index
+        out = []
+        for seg in segments:
+            out.append(
+                {"type": "sentence", "index": sentence_index, "text": seg.text, "code": seg.code}
+            )
             sentence_index += 1
-            buffer = buffer[m.end():]
+        return out
 
-    if buffer.strip():
-        yield {"type": "sentence", "index": sentence_index, "text": buffer}
+    try:
+        async for piece in llm.stream_chat(messages, persona=persona):
+            parts.append(piece)
+            yield {"type": "token", "t": piece}
+            for evt in sentence_events(segmenter.feed(piece)):
+                yield evt
 
-    reply = "".join(parts).strip()
-    assistant_msg = Message(conversation_id=conv.id, role="assistant", content=reply)
-    session.add(assistant_msg)
-    await session.commit()
-    await redis_client.cache_append_messages(
-        conv.id, {"role": "assistant", "content": reply}
-    )
+        for evt in sentence_events(segmenter.flush()):
+            yield evt
+        completed = True
+    finally:
+        # Runs on success, provider error AND client disconnect (cancellation).
+        reply = "".join(parts).strip()
+        if reply:
+            try:
+                await asyncio.shield(_persist_assistant(conv_id, reply))
+            except Exception:
+                log.exception("failed to persist assistant reply")
 
-    if remember and reply:
-        asyncio.create_task(_remember_bg(conv.project_id, f"Q: {user_text}\nA: {reply}"))
+    if remember and completed and reply:
+        task = asyncio.create_task(_remember_bg(project_id, f"Q: {user_text}\nA: {reply}"))
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
