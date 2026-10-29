@@ -40,7 +40,7 @@ from google.genai import types
 from src.core import gemini, ratelimit
 from src.core.config import settings
 from src.core.errors import AidaError
-from src.core.text import detect_language
+from src.core.text import detect_language, is_noise_phrase
 from src.voice import stt
 
 log = logging.getLogger("aida.voice.live")
@@ -159,8 +159,11 @@ async def _finalize(conn: _Conn, utt: _Utterance, force: bool = False) -> None:
         conn.cur = None
     msg = {"type": "final", "id": utt.id, "text": text,
            "language": detect_language(text) if text else "unknown"}
-    if not text and raw.strip() and stt.wrong_script(raw):
-        msg["reason"] = "script"  # noise heard as another language: the client must not retry it
+    if not text and raw.strip():
+        if stt.wrong_script(raw):
+            msg["reason"] = "script"  # noise heard as another language: do not retry it
+        elif is_noise_phrase(raw):
+            msg["reason"] = "noise"   # noise heard as an assistant-sounding phrase: same
     await conn.send(msg)
 
 

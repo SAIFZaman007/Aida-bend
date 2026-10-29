@@ -21,9 +21,14 @@ Two jobs, both deterministic (no model calls):
        "Version 3.5" into "Version 3." + "5"). Common abbreviations are skipped.
      • Lines inside ``` fences are flagged `code=True` (not spoken aloud).
      • A hard length cap prevents a no-punctuation stream from starving TTS.
+     • FIRST-CLAUSE RELEASE (optional): when the opening sentence of a reply is long,
+       it is cut at its last clause break (", " "; " " — ") once `first_clause_chars`
+       characters have streamed, so speech can start on the first clause. Only the
+       FIRST segment is ever cut this way; the partition property still holds.
 """
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 
@@ -38,6 +43,9 @@ _ABBREVIATIONS = {
 }
 
 MAX_SEGMENT_CHARS = 300
+
+_CLAUSE_MARKS = ",;—–"
+_CLAUSE_MIN_CHARS = 28  # never release a clause shorter than this (it would sound choppy)
 
 
 # ----------------------------------------------------------------- language
@@ -105,6 +113,52 @@ def is_foreign_script(text: str, allowed: tuple[str, ...] | list[str] = ("bengal
     if not any(a and a.strip() for a in allowed):
         return False
     return foreign_script_share(text, allowed) >= limit
+
+
+# ---------------------------------------------------------- "no speech" phrases
+# Speech models sometimes answer room noise or silence with a line that SOUNDS like a
+# voice assistant ("Didn't catch that. Please say it again.") or with caption junk
+# ("[silence]", "Thanks for watching"). That is not something the person said, so it
+# must never become a chat message. Only the whole transcript is matched, and only the
+# assistant-voiced forms: "I didn't catch that, say it again" (a real request addressed
+# to AIDA) is NOT dropped. The frontend mirrors this (lib/text.js, isNoisePhrase) and
+# both run the same vectors in tests/vectors/speech_vectors.json.
+_NOISE_WORDS = {
+    "silence", "music", "noise", "static", "inaudible", "unintelligible", "applause",
+    "laughter", "blank audio", "no audio", "background noise", "no speech",
+    "no speech detected", "no speech detected in the audio",
+}
+_NOISE_PATTERNS = [
+    re.compile(
+        r"^(sorry )?(didn't|did not|couldn't|could not) (quite )?(catch|hear|get|understand) "
+        r"(that|you|it)( (please )?(say|repeat|try)( that| it)?( again)?)?$"
+    ),
+    re.compile(r"^(thank you|thanks) for watching( this video)?$"),
+    re.compile(r"^(please )?subscribe( to my channel)?$"),
+    re.compile(r"^subtitles by .{0,40}$"),
+    re.compile(
+        r"^(দুঃখিত )?(আমি )?(ঠিক )?(বুঝতে|শুনতে) (পারিনি|পাইনি)"
+        r"( (দয়া করে )?(আবার|আরেকবার) বলুন)?$"
+    ),
+]
+
+
+def _plain_words(text: str) -> str:
+    """Lower-case words only: punctuation, brackets and symbols become spaces."""
+    t = (text or "").lower().replace("\u2019", "'").replace("\u2018", "'")
+    out = []
+    for ch in t:
+        cat = unicodedata.category(ch)
+        out.append(ch if cat[0] in "LMN" or ch == "'" else " ")
+    return " ".join("".join(out).split())
+
+
+def is_noise_phrase(text: str) -> bool:
+    """True when the whole transcript is a known 'there was no speech' phrase."""
+    t = _plain_words(text)
+    if not t or len(t.split()) > 12:
+        return False
+    return t in _NOISE_WORDS or any(p.match(t) for p in _NOISE_PATTERNS)
 
 
 # ------------------------------------------------------------- segmentation
@@ -194,13 +248,25 @@ def _find_boundary(s: str, final: bool) -> int | None:
     return None
 
 
+def _first_clause_cut(buf: str) -> int | None:
+    """End (exclusive) of the FIRST clause of at least _CLAUSE_MIN_CHARS characters that
+    is followed by whitespace, or None. The earliest usable break wins: it gets the
+    voice started soonest. "1,000" and "a,b" are not clause breaks (no space after)."""
+    for i in range(_CLAUSE_MIN_CHARS, len(buf) - 1):
+        if buf[i] in _CLAUSE_MARKS and buf[i + 1].isspace():
+            return i + 1
+    return None
+
+
 class SentenceSegmenter:
     """Incremental segmenter. feed() tokens as they stream, flush() at the end."""
 
-    def __init__(self) -> None:
+    def __init__(self, first_clause_chars: int = 0) -> None:
         self._buf = ""
         self._carry = ""  # whitespace-only chunks, glued onto the next segment
         self._in_fence = False
+        self._first_clause_chars = max(0, first_clause_chars)
+        self._emitted = False  # has any segment been released yet?
 
     def _emit(self, text: str) -> Segment:
         if text.lstrip().startswith("```"):
@@ -222,6 +288,14 @@ class SentenceSegmenter:
                     end = nl + 1
             else:
                 b = _find_boundary(self._buf, final)
+                if (
+                    b is None
+                    and not self._emitted
+                    and not final
+                    and self._first_clause_chars
+                    and len(self._buf) >= self._first_clause_chars
+                ):
+                    b = _first_clause_cut(self._buf)
                 if b is None:
                     if len(self._buf) > MAX_SEGMENT_CHARS:
                         cut = self._buf.rfind(" ", 0, MAX_SEGMENT_CHARS)
@@ -239,6 +313,7 @@ class SentenceSegmenter:
                 continue
             out.append(self._emit(self._carry + chunk))
             self._carry = ""
+            self._emitted = True
         return out
 
     def feed(self, piece: str) -> list[Segment]:

@@ -74,3 +74,8 @@ class ChatRequest(BaseModel):
     # Cap protects the paid API from oversized/abusive prompts.
     content: str = Field(min_length=1, max_length=settings.max_chat_chars)
     remember: bool = True
+    # The mode the person is looking at. Optional: when sent it wins over the stored
+    # mode (the "change mode" call may not have landed yet) and is stored itself.
+    persona: str | None = None
+
+    _persona = field_validator("persona")(_check_persona)

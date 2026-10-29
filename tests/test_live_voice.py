@@ -456,3 +456,25 @@ def test_live_empty_final_has_no_script_reason(ws_client):
         ws.send_json({"type": "end"})
         final = ws.receive_json()
         assert final["text"] == "" and "reason" not in final
+
+
+def test_live_assistant_sounding_noise_phrase_is_dropped_with_a_noise_reason(ws_client):
+    """The screenshot case: room noise came back as "Didn't catch that. Please say it again."
+    and was sent to the assistant as if the person had said it."""
+    c, install = ws_client
+    install(FakeLive(script={
+        "activity_end": [FakeLive.msg(final="Didn't catch that. Please say it again.", turn_complete=True)],
+    }))
+    with c.websocket_connect("/api/voice/stream") as ws:
+        assert ws.receive_json() == {"type": "ready"}
+        ws.send_json({"type": "start"})
+        ws.send_bytes(b"\x01" * 3200)
+        ws.send_json({"type": "end"})
+        final = ws.receive_json()
+        assert final["type"] == "final" and final["text"] == "" and final["reason"] == "noise"
+
+
+def test_clip_transcript_that_is_a_noise_phrase_is_empty():
+    assert stt.clean_transcript("Didn't catch that. Please say it again.") == ""
+    assert stt.clean_transcript("[BLANK_AUDIO]") == ""
+    assert stt.clean_transcript("I didn't catch that, can you say it again?") != ""   # a real request

@@ -190,7 +190,7 @@ async def chat(
     async def event_stream():
         frame_id = 0
         it = stream_reply(
-            session, body.conversation_id, body.content, body.remember
+            session, body.conversation_id, body.content, body.remember, persona=body.persona
         ).__aiter__()
         pending: asyncio.Future | None = None
         try:

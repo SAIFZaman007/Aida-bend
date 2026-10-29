@@ -121,7 +121,10 @@ class Settings(BaseSettings):
     # Documented lighter/faster sibling, used automatically when the main voice
     # model is overloaded or out of quota. Empty = no voice failover.
     gemini_tts_fallback_model: str = "gemini-3.8-flash-lite-tts"
-    tts_first_audio_timeout: float = 8.0   # no first audio byte by then -> fail over
+    tts_first_audio_timeout: float = 7.0   # no first audio byte by then -> that model has failed
+    # The backup voice model is also started when the main one has not produced audio
+    # after this many seconds (and the first to produce wins). 0 = only after a failure.
+    tts_hedge_after: float = 2.5
     tts_idle_timeout: float = 10.0         # silence between audio chunks
     tts_voice_female: str = "Kore"
     tts_voice_male: str = "Charon"
@@ -136,7 +139,9 @@ class Settings(BaseSettings):
 
     # --- Memory (long-term recall) ---
     memory_recall_k: int = 3
-    memory_recall_timeout: float = 1.5     # seconds (cloud embedding needs >0.5s)
+    # Seconds, counted from the START of the request. Recall now overlaps with the
+    # database work, so most of this budget is already spent while the history loads.
+    memory_recall_timeout: float = 1.0
     # Cosine distance cut-off: chunks farther than this are NOT injected. Tune
     # with scripts/smoke_test.py output; too high re-introduces irrelevant
     # context, too low disables memory.
@@ -153,6 +158,12 @@ class Settings(BaseSettings):
     daily_stt_cap: int = 3000
     daily_tts_cap: int = 30000
     max_chat_chars: int = 8000
+
+    # --- Reply pacing ---
+    # A long opening sentence is released at its FIRST comma/semicolon/dash (at least 28
+    # characters in, followed by a space) once this many characters have streamed without
+    # a sentence end, so the voice can start on the first clause. 0 = off.
+    first_clause_chars: int = 80
 
     @field_validator("llm_provider")
     @classmethod

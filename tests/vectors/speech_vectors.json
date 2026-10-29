@@ -151,5 +151,115 @@
       "in": "",
       "out": false
     }
+  ],
+  "noise_phrase": [
+    {
+      "in": "Didn't catch that. Please say it again.",
+      "out": true
+    },
+    {
+      "in": "Didn't catch that.",
+      "out": true
+    },
+    {
+      "in": "Sorry, I didn't catch that.",
+      "out": false
+    },
+    {
+      "in": "Sorry, didn't catch that - please repeat.",
+      "out": true
+    },
+    {
+      "in": "Didn’t catch that — please say it again.",
+      "out": true
+    },
+    {
+      "in": "Could not hear you. Please try again.",
+      "out": true
+    },
+    {
+      "in": "I didn't catch that, can you say it again?",
+      "out": false
+    },
+    {
+      "in": "Please say it again",
+      "out": false
+    },
+    {
+      "in": "say that again please",
+      "out": false
+    },
+    {
+      "in": "[silence]",
+      "out": true
+    },
+    {
+      "in": "(Music)",
+      "out": true
+    },
+    {
+      "in": "[BLANK_AUDIO]",
+      "out": true
+    },
+    {
+      "in": "blank audio",
+      "out": true
+    },
+    {
+      "in": "No speech detected.",
+      "out": true
+    },
+    {
+      "in": "Thanks for watching!",
+      "out": true
+    },
+    {
+      "in": "Thank you for watching this video.",
+      "out": true
+    },
+    {
+      "in": "Subtitles by the Amara.org community",
+      "out": true
+    },
+    {
+      "in": "silence the alarm please",
+      "out": false
+    },
+    {
+      "in": "play some music",
+      "out": false
+    },
+    {
+      "in": "What is the noise level in the server room?",
+      "out": false
+    },
+    {
+      "in": "আমি বুঝতে পারিনি। দয়া করে আবার বলুন।",
+      "out": true
+    },
+    {
+      "in": "দুঃখিত, আমি শুনতে পাইনি।",
+      "out": true
+    },
+    {
+      "in": "আবার বলুন",
+      "out": false
+    },
+    {
+      "in": "আমি বুঝতে পারিনি কেন এটা কাজ করছে না, আপনি ব্যাখ্যা করবেন?",
+      "out": false
+    },
+    {
+      "in": "",
+      "out": false
+    },
+    {
+      "in": "   ",
+      "out": false
+    },
+    {
+      "in": "hello there",
+      "out": false
+    }
   ]
 }

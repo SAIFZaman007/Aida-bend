@@ -214,13 +214,8 @@ async def _stream_model(model: str, text: str, voice: str, info: dict):
             raise AidaError("unavailable", "TTS stream carried no audio")
 
 
-async def synthesize_stream(text: str, gender: str, info: dict):
-    """Async generator of PCM chunks. Falls over to the backup voice model only
-    BEFORE the first byte (so the listener never hears two voices); after that a
-    failure just ends the clip. `info["sample_rate"]` is filled in as known."""
-    voice = settings.tts_voice(gender, dominant_language(text))
-    info.setdefault("sample_rate", settings.tts_sample_rate)
-    models = tts_models()
+async def _synthesize_sequential(models: list[str], text: str, voice: str, info: dict):
+    """One model at a time; the next only after the previous failed BEFORE any audio."""
     last: AidaError | None = None
     for i, model in enumerate(models):
         started = False
@@ -241,3 +236,129 @@ async def synthesize_stream(text: str, gender: str, info: dict):
             if i + 1 < len(models):
                 log.warning("tts failing over: %s -> %s (%s)", model, models[i + 1], err.code)
     raise last or AidaError("unavailable", "no voice model succeeded")
+
+
+async def _synthesize_hedged(models: list[str], text: str, voice: str, info: dict):
+    """Start the backup voice model when the main one is merely SLOW, not only when it
+    has failed, and use whichever produces audio first.
+
+    Waiting for a model to time out before trying the next one stacks the delays (8 s
+    + 8 s ...); this caps the wait for first audio at roughly `tts_hedge_after` plus the
+    backup's own time. The loser is cancelled, and the listener only ever hears ONE
+    voice model for a clip: nothing is yielded until a winner has produced a chunk."""
+    first, backup = models[0], models[1]
+    queue: asyncio.Queue = asyncio.Queue()
+    tasks: dict[str, asyncio.Task] = {}
+    infos: dict[str, dict] = {}
+
+    async def pump(model: str) -> None:
+        sub: dict = infos.setdefault(model, dict(info))
+        try:
+            async for chunk in _stream_model(model, text, voice, sub):
+                await queue.put((model, "chunk", chunk))
+            await queue.put((model, "end", None))
+        except asyncio.CancelledError:
+            raise
+        except AidaError as err:
+            await queue.put((model, "err", err))
+        except Exception as exc:  # defensive: map anything else
+            await queue.put((model, "err", gemini.map_exception(exc)))
+
+    def launch(model: str) -> None:
+        tasks[model] = asyncio.create_task(pump(model))
+
+    async def stop_all(keep: str | None = None) -> None:
+        for m, t in tasks.items():
+            if m != keep and not t.done():
+                t.cancel()
+        for m, t in tasks.items():
+            if m != keep:
+                try:
+                    await t
+                except BaseException:
+                    pass
+
+    winner: str | None = None
+    last: AidaError | None = None
+    errors: set[str] = set()
+    try:
+        launch(first)
+        hedge_at = settings.tts_hedge_after
+        while winner is None:
+            if backup not in tasks:
+                try:
+                    model, kind, payload = await asyncio.wait_for(queue.get(), hedge_at)
+                except asyncio.TimeoutError:
+                    log.info("tts %s slow (> %.1fs): also asking %s", first, hedge_at, backup)
+                    launch(backup)
+                    continue
+            else:
+                model, kind, payload = await queue.get()
+            if kind == "chunk":
+                winner = model
+                await stop_all(keep=model)
+                if model != first and first not in errors:
+                    gemini.mark_unhealthy(first)  # too slow: the backup goes first for a while
+                info.update({k: v for k, v in infos[model].items() if v})
+                gemini.mark_healthy(model)
+                yield payload
+            elif kind == "err":
+                errors.add(model)
+                last = payload
+                if not payload.retryable:
+                    raise payload
+                gemini.mark_unhealthy(model)
+                if backup not in tasks:
+                    log.warning("tts failing over: %s -> %s (%s)", first, backup, payload.code)
+                    launch(backup)
+                elif errors >= {first, backup}:
+                    raise last
+            else:  # "end" without audio: treat as a failed model
+                errors.add(model)
+                last = AidaError("unavailable", "TTS stream carried no audio")
+                gemini.mark_unhealthy(model)
+                if backup not in tasks:
+                    launch(backup)
+                elif errors >= {first, backup}:
+                    raise last
+        # A winner is streaming: pass its chunks through.
+        while True:
+            model, kind, payload = await queue.get()
+            if model != winner:
+                continue
+            if kind == "chunk":
+                yield payload
+            elif kind == "end":
+                return
+            else:
+                log.warning("tts stream cut mid-clip (%s): %s", payload.code, payload.detail[:120])
+                return
+    finally:
+        await stop_all()
+        if winner is not None and winner in tasks:
+            try:
+                await tasks[winner]
+            except BaseException:
+                pass
+
+
+async def synthesize_stream(text: str, gender: str, info: dict):
+    """Async generator of PCM chunks. Falls over to the backup voice model only
+    BEFORE the first byte (so the listener never hears two voices); after that a
+    failure just ends the clip. `info["sample_rate"]` is filled in as known.
+
+    With a backup model configured the two are HEDGED (see _synthesize_hedged): the
+    backup starts as soon as the main model fails or is slower than
+    `tts_hedge_after` seconds, instead of after its full timeout."""
+    voice = settings.tts_voice(gender, dominant_language(text))
+    info.setdefault("sample_rate", settings.tts_sample_rate)
+    models = tts_models()
+    if len(models) > 1 and settings.tts_hedge_after > 0:
+        gen = _synthesize_hedged(models, text, voice, info)
+    else:
+        gen = _synthesize_sequential(models, text, voice, info)
+    try:
+        async for chunk in gen:
+            yield chunk
+    finally:
+        await gen.aclose()

@@ -37,7 +37,7 @@ def client(fake_redis):
 
 
 def patch_stream(monkeypatch, events=(), error=None, delay=0.0):
-    async def fake(session, conv_id, content, remember):
+    async def fake(session, conv_id, content, remember, persona=None):
         if delay:
             await asyncio.sleep(delay)
         for e in events:

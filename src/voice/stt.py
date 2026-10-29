@@ -26,7 +26,7 @@ from google.genai import types
 from src.core import gemini
 from src.core.config import settings
 from src.core.errors import AidaError
-from src.core.text import foreign_script_share, is_foreign_script
+from src.core.text import foreign_script_share, is_foreign_script, is_noise_phrase
 
 log = logging.getLogger("aida.voice")
 
@@ -89,6 +89,9 @@ def clean_transcript(raw: str) -> str:
         log.info("transcript dropped: %.0f%% of letters outside %s",
                  100 * foreign_script_share(t, settings.stt_allowed_script_list),
                  ",".join(settings.stt_allowed_script_list))
+        return ""
+    if t and is_noise_phrase(t):
+        log.info("transcript dropped: a 'no speech' phrase, not something the person said")
         return ""
     return t
 

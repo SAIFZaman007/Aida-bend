@@ -12,6 +12,20 @@ Per turn:
      provider fails mid-stream — and store the exchange in memory in the
      BACKGROUND.
 
+v2.5 — speed and per-mode knowledge:
+ • Memory recall (a Gemini embedding call + a pgvector query) now starts the moment
+   the request arrives, on its own DB session, and overlaps with loading the
+   history and saving the user message instead of running after them. It is
+   skipped for trivial turns ("hi", "ok") and capped by memory_recall_timeout
+   measured from the START, so it can only ever delay the first token by what is
+   left of that budget.
+ • The mode can travel with the request (`persona`): the reply uses the mode the
+   person is looking at even if the separate "change mode" call has not landed yet.
+ • Recall and storage are partitioned per mode (memory/service.py): a specialist
+   recalls its own exchanges, Non-stop recalls all.
+ • The first sentence is released early at a clause break when the model writes a
+   long opening sentence, so the voice can start sooner (core/text.py).
+
 v2.1 fixes (all reproduced with tests/test_history.py):
  • The new user message used to be sent to the model TWICE per turn (it was
    saved + cached before history was read, then appended again).
@@ -31,7 +45,7 @@ from collections.abc import AsyncGenerator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agents.prompts import system_prompt
+from src.agents.prompts import PERSONAS, system_prompt
 from src.core import redis_client
 from src.core.config import settings
 from src.core.database import SessionLocal
@@ -79,23 +93,50 @@ async def _recent_history(session: AsyncSession, conversation_id: str) -> list[d
     return history
 
 
-async def build_messages(
-    session: AsyncSession, conv: Conversation, user_text: str, history: list[dict]
+def wants_recall(user_text: str) -> bool:
+    """Skip the embedding round-trip for turns that cannot match a stored note."""
+    t = user_text.strip()
+    return (len(t) >= 12 and len(t.split()) >= 3) or len(t) >= 24
+
+
+async def _recall_isolated(project_id: str, persona: str, user_text: str) -> list[str]:
+    """Recall on its OWN session: it runs while the request session is busy saving the
+    user turn (one AsyncSession must never be used by two coroutines at once)."""
+    try:
+        async with SessionLocal() as s:
+            return await memory.recall(s, project_id, user_text, persona=persona)
+    except Exception:
+        log.debug("memory recall failed", exc_info=True)
+        return []
+
+
+async def _collect_recall(task: "asyncio.Task | None", started: float) -> list[str]:
+    """The recalled notes if they are ready within what is left of the budget."""
+    if task is None:
+        return []
+    left = max(0.05, settings.memory_recall_timeout - (time.perf_counter() - started))
+    done, _ = await asyncio.wait({task}, timeout=left)
+    if task in done:
+        try:
+            return task.result()
+        except Exception:
+            return []
+    task.cancel()
+    log.info("memory recall skipped: not ready within %.1fs", settings.memory_recall_timeout)
+    return []
+
+
+def build_messages(
+    conv, user_text: str, history: list[dict], recalled: list[str] | None = None,
+    persona: str | None = None,
 ) -> list[dict]:
-    persona_prompt = system_prompt(conv.persona)
+    persona_prompt = system_prompt(persona or conv.persona)
     if detect_language(user_text) == "bn":
         persona_prompt += " " + _BN_NOTE
     messages: list[dict] = [{"role": "system", "content": persona_prompt}]
 
-    try:
-        chunks = await asyncio.wait_for(
-            memory.recall(session, conv.project_id, user_text),
-            settings.memory_recall_timeout,
-        )
-    except Exception:
-        chunks = []
-    if chunks:
-        recalled = "\n".join(f"- {c}" for c in chunks)
+    if recalled:
+        notes = "\n".join(f"- {c}" for c in recalled)
         messages.append(
             {
                 "role": "system",
@@ -103,7 +144,7 @@ async def build_messages(
                     "Notes from earlier work on this project. They may be outdated "
                     "or wrong: do not present them as verified fact, use them only "
                     "if clearly relevant, and prefer the user's latest message if "
-                    "they conflict:\n" + recalled
+                    "they conflict:\n" + notes
                 ),
             }
         )
@@ -114,11 +155,12 @@ async def build_messages(
     return messages
 
 
-async def _remember_bg(project_id: str, text: str) -> None:
-    """Detached: store the exchange in memory without delaying the response."""
+async def _remember_bg(project_id: str, text: str, persona: str | None = None) -> None:
+    """Detached: store the exchange in memory without delaying the response. It is
+    filed under the mode it was said in (see memory/service.py)."""
     try:
         async with SessionLocal() as s:
-            await memory.remember(s, project_id, text, source="message")
+            await memory.remember(s, project_id, text, source=memory.message_source(persona))
     except Exception:
         log.debug("background memory write failed", exc_info=True)
 
@@ -135,29 +177,45 @@ async def _persist_assistant(conversation_id: str, reply: str) -> None:
 
 
 async def stream_reply(
-    session: AsyncSession, conversation_id: str, user_text: str, remember: bool
+    session: AsyncSession, conversation_id: str, user_text: str, remember: bool,
+    persona: str | None = None,
 ) -> AsyncGenerator[dict, None]:
+    t0 = time.perf_counter()
     conv = await session.get(Conversation, conversation_id)
     if conv is None:
         raise AidaError("not_found", conversation_id)
+    # The request's mode wins over what was stored (the "change mode" call may still be
+    # on its way) and is stored, so the next turn and a reload agree with it.
+    if persona and persona in PERSONAS and persona != conv.persona:
+        conv.persona = persona
     conv_id, project_id, persona = conv.id, conv.project_id, conv.persona
 
-    # 1) PRIOR history first — never include the message we are about to send.
-    history = await _recent_history(session, conv_id)
-
-    # 2) Persist the user turn.
-    session.add(Message(conversation_id=conv_id, role="user", content=user_text))
-    await session.commit()
-    await redis_client.cache_append_messages(
-        conv_id, {"role": "user", "content": user_text}
+    # Recall starts NOW and overlaps with the database work below.
+    recall_task = (
+        asyncio.create_task(_recall_isolated(project_id, persona, user_text))
+        if wants_recall(user_text)
+        else None
     )
+    try:
+        # 1) PRIOR history first — never include the message we are about to send.
+        history = await _recent_history(session, conv_id)
 
-    t0 = time.perf_counter()
-    messages = await build_messages(session, conv, user_text, history)
-    t_ctx = time.perf_counter() - t0  # history + memory recall, before the model is called
+        # 2) Persist the user turn (and the mode, if it changed).
+        session.add(Message(conversation_id=conv_id, role="user", content=user_text))
+        await session.commit()
+        await redis_client.cache_append_messages(
+            conv_id, {"role": "user", "content": user_text}
+        )
+
+        recalled = await _collect_recall(recall_task, t0)
+        messages = build_messages(conv, user_text, history, recalled, persona)
+    finally:
+        if recall_task is not None and not recall_task.done():
+            recall_task.cancel()
+    t_ctx = time.perf_counter() - t0  # history + save + recall, before the model is called
 
     parts: list[str] = []
-    segmenter = SentenceSegmenter()
+    segmenter = SentenceSegmenter(first_clause_chars=settings.first_clause_chars)
     sentence_index = 0
     completed = False
 
@@ -174,8 +232,8 @@ async def stream_reply(
     try:
         async for piece in llm.stream_chat(messages, persona=persona):
             if not parts:
-                log.info("chat first-token ttft=%.2fs (context %.2fs) persona=%s",
-                         time.perf_counter() - t0, t_ctx, persona)
+                log.info("chat first-token ttft=%.2fs (context %.2fs, recalled %d) persona=%s",
+                         time.perf_counter() - t0, t_ctx, len(recalled), persona)
             parts.append(piece)
             yield {"type": "token", "t": piece}
             for evt in sentence_events(segmenter.feed(piece)):
@@ -196,6 +254,8 @@ async def stream_reply(
                 log.exception("failed to persist assistant reply")
 
     if remember and completed and reply:
-        task = asyncio.create_task(_remember_bg(project_id, f"Q: {user_text}\nA: {reply}"))
+        task = asyncio.create_task(
+            _remember_bg(project_id, f"Q: {user_text}\nA: {reply}", persona)
+        )
         _bg_tasks.add(task)
         task.add_done_callback(_bg_tasks.discard)

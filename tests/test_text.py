@@ -92,3 +92,87 @@ def test_foreign_script_share_and_allow_list():
     assert not is_foreign_script("就说那个。", [])
     # names are case-insensitive
     assert not is_foreign_script("আমি", ["Bengali"])
+
+
+# ---- v2.5: the first clause of a long opening sentence is released early ------------
+import random
+
+from src.core.text import SentenceSegmenter, split_sentences  # noqa: E402
+
+LONG_OPENER = ("Well, after looking at the numbers you sent, the most likely cause is a missing "
+               "index on the table, which makes every lookup scan all rows. Add the index first.")
+
+
+def _feed(text, step, **kw):
+    seg = SentenceSegmenter(**kw)
+    out = []
+    for i in range(0, len(text), step):
+        out += seg.feed(text[i:i + step])
+    out += seg.flush()
+    return out
+
+
+def test_first_clause_is_released_early_when_the_opening_sentence_is_long():
+    seg = SentenceSegmenter(first_clause_chars=60)
+    got = seg.feed(LONG_OPENER[:75])
+    assert [s.text for s in got] == ["Well, after looking at the numbers you sent,"]
+    assert got[0].code is False
+
+
+def test_early_release_never_changes_the_text():
+    for step in (1, 3, 7, 50):
+        parts = _feed(LONG_OPENER, step, first_clause_chars=60)
+        assert "".join(s.text for s in parts) == LONG_OPENER
+        assert len(parts) >= 3  # clause + rest of sentence + the second sentence
+
+
+def test_only_the_first_segment_is_cut_at_a_clause():
+    parts = _feed(LONG_OPENER + " " + LONG_OPENER, 5, first_clause_chars=60)
+    texts = [s.text for s in parts]
+    assert texts[0].endswith("sent,")
+    # the second long sentence is NOT chopped at its commas
+    assert any(t.strip().startswith("Well, after") and t.strip().endswith("all rows.") for t in texts)
+
+
+def test_short_sentences_and_default_behaviour_are_untouched():
+    text = "Yes, that works. Anything else, maybe?"
+    assert [s.text for s in _feed(text, 4, first_clause_chars=80)] == [s.text for s in split_sentences(text)]
+    # off by default: identical to the old behaviour
+    assert [s.text for s in _feed(LONG_OPENER, 5)] == [s.text for s in split_sentences(LONG_OPENER)]
+
+
+def test_numbers_and_tiny_clauses_are_not_cut():
+    seg = SentenceSegmenter(first_clause_chars=40)
+    assert seg.feed("The total comes to 1,000,000 units across all of the regions we serve") == []
+    seg = SentenceSegmenter(first_clause_chars=30)
+    assert seg.feed("Hi, this is a rather long opening that just keeps on going and going") == []  # "Hi," < 28 chars
+
+
+def test_code_fences_are_never_cut_by_the_early_release():
+    text = "```python\nprint('a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t, u, v')\n```\n"
+    parts = _feed(text, 6, first_clause_chars=30)
+    assert "".join(s.text for s in parts) == text
+    assert all(s.code for s in parts)
+
+
+def test_early_release_partition_holds_for_random_text_and_chunking():
+    rng = random.Random(7)
+    words = ["alpha,", "beta", "gamma;", "delta", "ε,", "আমি", "ভালো,", "আছি।", "ok.", "3.5", "x", "—", "end?"]
+    for _ in range(200):
+        text = " ".join(rng.choice(words) for _ in range(rng.randint(3, 60)))
+        step = rng.randint(1, 9)
+        parts = _feed(text, step, first_clause_chars=rng.choice([20, 40, 80]))
+        assert "".join(s.text for s in parts) == text
+
+
+# ---------------------------------------------------- "no speech" phrases (v2.5)
+from src.core.text import is_noise_phrase  # noqa: E402
+
+
+@pytest.mark.parametrize("case", VECTORS["noise_phrase"])
+def test_noise_phrase_vectors(case):
+    assert is_noise_phrase(case["in"]) is case["out"], case["in"]
+
+
+def test_long_sentences_are_never_noise_phrases():
+    assert not is_noise_phrase("Didn't catch that " + "word " * 12)
