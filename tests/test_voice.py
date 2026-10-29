@@ -95,6 +95,22 @@ def test_clean_transcript():
     assert stt.clean_transcript("Docker কী?") == "Docker কী?"
 
 
+def test_clean_transcript_drops_other_scripts(monkeypatch):
+    # room noise heard as Chinese / Russian must never reach the chat
+    assert stt.clean_transcript("就说那个。") == ""
+    assert stt.clean_transcript("Привет") == ""
+    assert stt.clean_transcript("hello 你好") == "hello 你好"   # a stray word is not noise
+    monkeypatch.setattr(settings, "stt_allowed_scripts", "")
+    assert stt.clean_transcript("就说那个。") == "就说那个。"      # the guard can be switched off
+    monkeypatch.setattr(settings, "stt_allowed_scripts", "bengali,latin,cjk")
+    assert stt.clean_transcript("就说那个。") == "就说那个。"
+
+
+def test_language_hints_are_bengali_and_english_by_default():
+    assert settings.stt_language_codes == ["bn-BD", "en-US"]
+    assert stt.audio_transcription_config().language_codes == ["bn-BD", "en-US"]
+
+
 def test_safe_mime():
     assert stt.safe_mime("audio/webm;codecs=opus") == "audio/webm"
     assert stt.safe_mime("application/x-evil") == "audio/webm"

@@ -1,27 +1,155 @@
 {
   "_doc": "Executed by BOTH backend (pytest) and frontend (node --test). Expected values are hand-written specs, not snapshots. Keep this file identical in both repos.",
   "normalize": [
-    {"id": "bn-digits-preserved", "in": "আমার ফোন নম্বর ১২৩৪৫৬৭৮ এবং দাম ৫০০০ টাকা।", "out": "আমার ফোন নম্বর ১২৩৪৫৬৭৮ এবং দাম ৫০০০ টাকা।"},
-    {"id": "bn-percent-in-bengali", "in": "আমি API ব্যবহার করি ১০০% নিশ্চিত", "out": "আমি API ব্যবহার করি ১০০ শতাংশ নিশ্চিত"},
-    {"id": "bn-plus", "in": "আমি A+ পেয়েছি", "out": "আমি A প্লাস পেয়েছি"},
-    {"id": "bn-hash-number", "in": "টিকিট #৫ দেখুন", "out": "টিকিট নম্বর ৫ দেখুন"},
-    {"id": "bn-repeat-word-kept", "in": "ধীরে ধীরে ধীরে চলুন", "out": "ধীরে ধীরে ধীরে চলুন"},
-    {"id": "en-long-number", "in": "Order 12345678 shipped.", "out": "Order twelve million three hundred forty-five thousand six hundred seventy-eight shipped."},
-    {"id": "en-phone-digit-by-digit", "in": "Call 01712345678 now", "out": "Call 0 1 7 1 2 3 4 5 6 7 8 now"},
-    {"id": "en-abbrev-symbols", "in": "API e.g. 50% off & more", "out": "A P I for example, 50 percent off and more"},
-    {"id": "en-stutter-chars", "in": "soooo good!!!", "out": "so good!"},
-    {"id": "en-stutter-words", "in": "go go go go now", "out": "go now"},
-    {"id": "en-decimal-and-time-untouched", "in": "Price 3.5 & tax 10:30", "out": "Price 3.5 and tax 10:30"},
-    {"id": "en-titles-acronyms", "in": "Dr. Rahman said ASAP", "out": "Doctor Rahman said as soon as possible"},
-    {"id": "en-hash-number", "in": "#5 priority", "out": "number 5 priority"},
-    {"id": "empty", "in": "", "out": ""}
+    {
+      "id": "bn-digits-preserved",
+      "in": "আমার ফোন নম্বর ১২৩৪৫৬৭৮ এবং দাম ৫০০০ টাকা।",
+      "out": "আমার ফোন নম্বর ১২৩৪৫৬৭৮ এবং দাম ৫০০০ টাকা।"
+    },
+    {
+      "id": "bn-percent-in-bengali",
+      "in": "আমি API ব্যবহার করি ১০০% নিশ্চিত",
+      "out": "আমি API ব্যবহার করি ১০০ শতাংশ নিশ্চিত"
+    },
+    {
+      "id": "bn-plus",
+      "in": "আমি A+ পেয়েছি",
+      "out": "আমি A প্লাস পেয়েছি"
+    },
+    {
+      "id": "bn-hash-number",
+      "in": "টিকিট #৫ দেখুন",
+      "out": "টিকিট নম্বর ৫ দেখুন"
+    },
+    {
+      "id": "bn-repeat-word-kept",
+      "in": "ধীরে ধীরে ধীরে চলুন",
+      "out": "ধীরে ধীরে ধীরে চলুন"
+    },
+    {
+      "id": "en-long-number",
+      "in": "Order 12345678 shipped.",
+      "out": "Order twelve million three hundred forty-five thousand six hundred seventy-eight shipped."
+    },
+    {
+      "id": "en-phone-digit-by-digit",
+      "in": "Call 01712345678 now",
+      "out": "Call 0 1 7 1 2 3 4 5 6 7 8 now"
+    },
+    {
+      "id": "en-abbrev-symbols",
+      "in": "API e.g. 50% off & more",
+      "out": "A P I for example, 50 percent off and more"
+    },
+    {
+      "id": "en-stutter-chars",
+      "in": "soooo good!!!",
+      "out": "so good!"
+    },
+    {
+      "id": "en-stutter-words",
+      "in": "go go go go now",
+      "out": "go now"
+    },
+    {
+      "id": "en-decimal-and-time-untouched",
+      "in": "Price 3.5 & tax 10:30",
+      "out": "Price 3.5 and tax 10:30"
+    },
+    {
+      "id": "en-titles-acronyms",
+      "in": "Dr. Rahman said ASAP",
+      "out": "Doctor Rahman said as soon as possible"
+    },
+    {
+      "id": "en-hash-number",
+      "in": "#5 priority",
+      "out": "number 5 priority"
+    },
+    {
+      "id": "empty",
+      "in": "",
+      "out": ""
+    }
   ],
   "detect_language": [
-    {"in": "আমি ভালো আছি", "out": "bn"},
-    {"in": "hello there", "out": "en"},
-    {"in": "Docker কী", "out": "mixed"},
-    {"in": "১২৩ ৪৫৬", "out": "unknown"},
-    {"in": "", "out": "unknown"},
-    {"in": "ami bhalo achi", "out": "en"}
+    {
+      "in": "আমি ভালো আছি",
+      "out": "bn"
+    },
+    {
+      "in": "hello there",
+      "out": "en"
+    },
+    {
+      "in": "Docker কী",
+      "out": "mixed"
+    },
+    {
+      "in": "১২৩ ৪৫৬",
+      "out": "unknown"
+    },
+    {
+      "in": "",
+      "out": "unknown"
+    },
+    {
+      "in": "ami bhalo achi",
+      "out": "en"
+    }
+  ],
+  "foreign_script": [
+    {
+      "in": "就说那个。",
+      "out": true
+    },
+    {
+      "in": "Привет, как дела",
+      "out": true
+    },
+    {
+      "in": "مرحبا بكم",
+      "out": true
+    },
+    {
+      "in": "こんにちは",
+      "out": true
+    },
+    {
+      "in": "আমি ভালো আছি",
+      "out": false
+    },
+    {
+      "in": "Docker কী?",
+      "out": false
+    },
+    {
+      "in": "hello there",
+      "out": false
+    },
+    {
+      "in": "café déjà vu naïve",
+      "out": false
+    },
+    {
+      "in": "মোবাইল 5G ফোন",
+      "out": false
+    },
+    {
+      "in": "hello 你好",
+      "out": false
+    },
+    {
+      "in": "你好 hello 世界",
+      "out": true
+    },
+    {
+      "in": "12345 !?",
+      "out": false
+    },
+    {
+      "in": "",
+      "out": false
+    }
   ]
 }

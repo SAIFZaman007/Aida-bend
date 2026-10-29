@@ -24,6 +24,7 @@ Two jobs, both deterministic (no model calls):
 """
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 
 _BN_LO, _BN_HI = 0x0980, 0x09FF
@@ -71,6 +72,39 @@ def dominant_language(text: str) -> str:
     """Always 'bn' or 'en' (ties and unknowns -> 'en')."""
     bn, latin = script_counts(text)
     return "bn" if bn > latin else "en"
+
+
+# Share of letters in a transcript that are NOT in an allowed script above which it is
+# treated as "no speech": speech models invent Chinese/Cyrillic/... text from room noise.
+FOREIGN_SCRIPT_LIMIT = 0.4
+
+
+def foreign_script_share(text: str, allowed: tuple[str, ...] | list[str] = ("bengali", "latin")) -> float:
+    """Fraction (0..1) of the letters in `text` written in a script outside `allowed`.
+
+    Scripts are Unicode script names ("bengali", "latin", "devanagari" ...). Accented
+    Latin letters count as Latin. Digits, punctuation, spaces and combining marks are
+    ignored; text with no letters at all has share 0.
+    """
+    allow = tuple(a.strip().upper() for a in allowed if a and a.strip())
+    total = foreign = 0
+    for ch in text or "":
+        if not ch.isalpha():
+            continue
+        total += 1
+        name = unicodedata.name(ch, "")
+        if not any(name.startswith(a + " ") for a in allow):
+            foreign += 1
+    return foreign / total if total else 0.0
+
+
+def is_foreign_script(text: str, allowed: tuple[str, ...] | list[str] = ("bengali", "latin"),
+                      limit: float = FOREIGN_SCRIPT_LIMIT) -> bool:
+    """True when the text is (mostly) in a script the assistant does not speak.
+    An empty `allowed` list disables the check."""
+    if not any(a and a.strip() for a in allowed):
+        return False
+    return foreign_script_share(text, allowed) >= limit
 
 
 # ------------------------------------------------------------- segmentation

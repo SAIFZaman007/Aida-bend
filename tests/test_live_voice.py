@@ -427,3 +427,32 @@ async def test_health_reports_live_and_streaming_voice(http):
     async with http() as c:
         v = (await c.get("/api/health")).json()["voice"]
     assert v["stream"] is True and v["stt_live"] and v["tts_backup"]
+
+
+def test_live_foreign_script_is_not_shown_and_final_is_empty(ws_client):
+    """Noise heard as Chinese: no caption, an empty final tagged so the client does not retry."""
+    c, install = ws_client
+    install(FakeLive(script={
+        "audio": [FakeLive.msg(interim="就说")],
+        "activity_end": [FakeLive.msg(final="就说那个。", turn_complete=True)],
+    }))
+    with c.websocket_connect("/api/voice/stream") as ws:
+        assert ws.receive_json() == {"type": "ready"}
+        ws.send_json({"type": "start"})
+        ws.send_bytes(b"\x01" * 3200)
+        ws.send_json({"type": "end"})
+        final = ws.receive_json()          # the first message is the final: no interim caption was sent
+        assert final["type"] == "final" and final["text"] == ""
+        assert final["language"] == "unknown" and final["reason"] == "script"
+
+
+def test_live_empty_final_has_no_script_reason(ws_client):
+    c, install = ws_client
+    install(FakeLive(script={"activity_end": [FakeLive.msg(final="   ", turn_complete=True)]}))
+    with c.websocket_connect("/api/voice/stream") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "start"})
+        ws.send_bytes(b"\x01" * 3200)
+        ws.send_json({"type": "end"})
+        final = ws.receive_json()
+        assert final["text"] == "" and "reason" not in final

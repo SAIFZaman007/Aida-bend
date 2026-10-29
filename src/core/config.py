@@ -99,7 +99,15 @@ class Settings(BaseSettings):
     gemini_stt_live_model: str = "gemini-3.5-transcribe-live"
     stt_live_enabled: bool = True           # false = always use the per-clip path
     gemini_stt_mode: str = "SMART"          # SMART (clean punctuation) | VERBATIM
-    stt_languages: str = ""                 # optional BCP-47 hints, e.g. "bn-BD,en-US"; empty = auto
+    # Language HINTS for the speech models. Pure auto-detect lets room noise come back as
+    # Chinese/Russian/...; the hints keep recognition on the two languages we speak.
+    # Empty = fully automatic.
+    stt_languages: str = "bn-BD,en-US"
+    # Safety net for anything that still slips through: a transcript written (mostly) in
+    # another script is dropped as "no speech". Script words as they appear in Unicode
+    # character names (bengali, latin, devanagari, arabic, cyrillic, cjk ...), comma
+    # separated; empty = accept any script.
+    stt_allowed_scripts: str = "bengali,latin"
     gemini_stt_thinking_level: str = "low"  # only for a general model used as STT backup
     gemini_stt_fallback_model: str = ""     # empty -> GEMINI_FALLBACK_MODEL is used
     max_audio_bytes: int = 10 * 1024 * 1024
@@ -185,6 +193,10 @@ class Settings(BaseSettings):
     @property
     def stt_language_codes(self) -> list[str]:
         return [c.strip() for c in self.stt_languages.split(",") if c.strip()]
+
+    @property
+    def stt_allowed_script_list(self) -> list[str]:
+        return [c.strip().lower() for c in self.stt_allowed_scripts.split(",") if c.strip()]
 
     @property
     def stt_mode(self) -> str:

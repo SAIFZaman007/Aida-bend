@@ -3,7 +3,8 @@ import os
 
 import pytest
 
-from src.core.text import SentenceSegmenter, detect_language, dominant_language, split_sentences
+from src.core.text import (SentenceSegmenter, detect_language, dominant_language, foreign_script_share,
+                           is_foreign_script, split_sentences)
 
 with open(os.path.join(os.path.dirname(__file__), "vectors", "speech_vectors.json"), encoding="utf-8") as _f:
     VECTORS = json.load(_f)
@@ -72,3 +73,22 @@ def test_detect_language_vectors(case):
 def test_dominant_language_defaults_to_en():
     assert dominant_language("১২৩") == "en"
     assert dominant_language("আমি") == "bn"
+
+
+# ---------------------------------------------------- transcript script guard
+@pytest.mark.parametrize("case", VECTORS["foreign_script"])
+def test_foreign_script_vectors(case):
+    assert is_foreign_script(case["in"]) is case["out"]
+
+
+def test_foreign_script_share_and_allow_list():
+    assert foreign_script_share("") == 0.0
+    assert foreign_script_share("12 !?") == 0.0
+    assert foreign_script_share("就说") == 1.0
+    assert foreign_script_share("ab就说") == 0.5
+    # other scripts can be allowed explicitly; an empty list disables the check
+    assert not is_foreign_script("नमस्ते", ["bengali", "latin", "devanagari"])
+    assert is_foreign_script("नमस्ते")
+    assert not is_foreign_script("就说那个。", [])
+    # names are case-insensitive
+    assert not is_foreign_script("আমি", ["Bengali"])

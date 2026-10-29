@@ -26,6 +26,7 @@ from google.genai import types
 from src.core import gemini
 from src.core.config import settings
 from src.core.errors import AidaError
+from src.core.text import foreign_script_share, is_foreign_script
 
 log = logging.getLogger("aida.voice")
 
@@ -70,6 +71,11 @@ def audio_transcription_config() -> types.AudioTranscriptionConfig:
     )
 
 
+def wrong_script(text: str) -> bool:
+    """True when `text` is in a script outside STT_ALLOWED_SCRIPTS (e.g. Chinese noise)."""
+    return is_foreign_script(text, settings.stt_allowed_script_list)
+
+
 def clean_transcript(raw: str) -> str:
     t = (raw or "").strip()
     if not t or NO_SPEECH in t:
@@ -78,6 +84,12 @@ def clean_transcript(raw: str) -> str:
     t = _LABEL_RE.sub("", t)
     if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'“”":
         t = t[1:-1].strip()
+    if t and wrong_script(t):
+        # never log the words themselves, only that and how much
+        log.info("transcript dropped: %.0f%% of letters outside %s",
+                 100 * foreign_script_share(t, settings.stt_allowed_script_list),
+                 ",".join(settings.stt_allowed_script_list))
+        return ""
     return t
 
 

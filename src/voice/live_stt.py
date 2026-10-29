@@ -153,11 +153,15 @@ async def _finalize(conn: _Conn, utt: _Utterance, force: bool = False) -> None:
         if now - started >= FINALIZE_MAX_SECONDS:
             break
         await asyncio.sleep(0.05)
-    text = stt.clean_transcript(utt.caption())
+    raw = utt.caption()
+    text = stt.clean_transcript(raw)
     if conn.cur is utt:
         conn.cur = None
-    await conn.send({"type": "final", "id": utt.id, "text": text,
-                     "language": detect_language(text) if text else "unknown"})
+    msg = {"type": "final", "id": utt.id, "text": text,
+           "language": detect_language(text) if text else "unknown"}
+    if not text and raw.strip() and stt.wrong_script(raw):
+        msg["reason"] = "script"  # noise heard as another language: the client must not retry it
+    await conn.send(msg)
 
 
 async def _flush_now(conn: _Conn) -> None:
@@ -226,12 +230,13 @@ async def _from_gemini(conn: _Conn) -> None:
                 utt.interim = ""
                 utt.last_event = now
                 utt.final_at = now
-                if conn.active:
+                if conn.active and not stt.wrong_script(utt.caption()):
                     await conn.send({"type": "interim", "id": utt.id, "text": utt.caption()})
             elif interim is not None and getattr(interim, "text", None):
                 utt.interim = interim.text.strip()
                 utt.last_event = now
-                await conn.send({"type": "interim", "id": utt.id, "text": utt.caption()})
+                if not stt.wrong_script(utt.caption()):  # no live captions in a language we do not speak
+                    await conn.send({"type": "interim", "id": utt.id, "text": utt.caption()})
             if getattr(sc, "turn_complete", False):
                 utt.turn_complete = True
 
