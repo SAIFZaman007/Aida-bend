@@ -204,3 +204,58 @@ async def test_speak_validation_and_failure_codes(client, monkeypatch):
         r = await c.post("/api/voice/speak", json={"text": "Hello"})
     assert r.status_code == 503 and "sk-123" not in r.text
     assert r.json()["detail"]["code"] == "rate_limited"
+
+
+def _stt_client(monkeypatch, behaviour):
+    from google.genai import errors as genai_errors  # noqa: F401
+    seen = []
+    async def generate_content(*, model, contents, config):
+        seen.append(model)
+        return behaviour(model)
+    monkeypatch.setattr(gemini, "get_client", lambda: types.SimpleNamespace(
+        aio=types.SimpleNamespace(models=types.SimpleNamespace(generate_content=generate_content))))
+    return seen
+
+
+def _overloaded():
+    from google.genai import errors as genai_errors
+    return genai_errors.APIError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "high demand"}})
+
+
+async def test_stt_fails_over_to_backup_model_on_overload(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_fallback_model", "backup-m")
+    monkeypatch.setattr(settings, "gemini_stt_fallback_model", "")
+    def behaviour(model):
+        if model == settings.gemini_stt_model:
+            raise _overloaded()
+        return types.SimpleNamespace(text="hello")
+    seen = _stt_client(monkeypatch, behaviour)
+    assert await stt.transcribe(b"\x00" * 3000, "audio/wav") == "hello"
+    assert seen == [settings.gemini_stt_model, "backup-m"]  # one try, then the backup
+
+
+async def test_stt_own_backup_setting_wins_and_no_backup_retries_once(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_fallback_model", "chat-backup")
+    monkeypatch.setattr(settings, "gemini_stt_fallback_model", "stt-backup")
+    assert settings.stt_fallback_model == "stt-backup"
+    monkeypatch.setattr(settings, "gemini_fallback_model", "")
+    monkeypatch.setattr(settings, "gemini_stt_fallback_model", "")
+    def behaviour(model):
+        raise _overloaded()
+    seen = _stt_client(monkeypatch, behaviour)
+    with pytest.raises(AidaError) as ei:
+        await stt.transcribe(b"\x00" * 3000, "audio/wav")
+    assert ei.value.code == "unavailable" and seen == [settings.gemini_stt_model] * 2
+
+
+async def test_stt_skips_a_model_that_just_failed(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_fallback_model", "backup-m")
+    monkeypatch.setattr(settings, "gemini_stt_fallback_model", "")
+    def behaviour(model):
+        if model == settings.gemini_stt_model:
+            raise _overloaded()
+        return types.SimpleNamespace(text="hi")
+    seen = _stt_client(monkeypatch, behaviour)
+    assert await stt.transcribe(b"\x00" * 3000, "audio/wav") == "hi"
+    assert await stt.transcribe(b"\x00" * 3000, "audio/wav") == "hi"
+    assert seen == [settings.gemini_stt_model, "backup-m", "backup-m"]  # 2nd call goes straight to the backup

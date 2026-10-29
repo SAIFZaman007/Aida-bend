@@ -154,6 +154,16 @@ async def main() -> int:
         await timed("fallback", f"fallback model streaming  [{settings.fallback_model}]",
                     lambda: _first_token(client, settings.fallback_model, None))
 
+    # 9 STT backup
+    if settings.stt_fallback_model and settings.stt_fallback_model != settings.gemini_stt_model:
+        async def stt_backup():
+            r = await client.aio.models.generate_content(
+                model=settings.stt_fallback_model,
+                contents=[types.Part.from_bytes(data=audio, mime_type="audio/wav"), "Transcribe this audio."],
+                config=cfg(settings.stt_fallback_model, None))
+            return r.text
+        await timed("stt_backup", f"speech-to-text BACKUP  [{settings.stt_fallback_model}]", stt_backup)
+
     verdict()
     return 0 if all(results.values()) else 1
 

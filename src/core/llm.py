@@ -90,19 +90,23 @@ class LLM:
     ) -> AsyncGenerator[str, None]:
         """Yield reply text. Resilience plan, in order:
 
-          1. stream from the primary model (retry 429/5xx a couple of times);
-          2. if the stream STALLS (no first token), ask the same model without
-             streaming — a different code path on the provider side;
-          3. fail over to GEMINI_FALLBACK_MODEL if one is configured.
+          1. stream from the primary model (a model that failed in the last
+             `llm_cooldown_seconds` is tried after the backup instead);
+          2. 429 -> backup at once; 503 -> one retry, then backup;
+          3. a STALLED stream goes to the backup model; the same model without
+             streaming is the last resort (or the only one, with no backup).
 
         Failover only happens before the first token, so text the user already
         saw is never repeated or spliced.
         """
         model = settings.model_for_persona(persona) if persona else settings.chat_model
-        plan: list[_Route] = [_Route(model, "stream")]
+        models = [model]
         fallback = settings.fallback_model
         if fallback and fallback != model:
-            plan.append(_Route(fallback, "stream"))
+            models.append(fallback)
+        if not settings.is_anthropic:
+            models = gemini.order_models(models)  # skip a model that just failed
+        plan: list[_Route] = [_Route(m, "stream") for m in models]
 
         last: AidaError | None = None
         while plan:
@@ -114,6 +118,7 @@ class LLM:
                     async for piece in self._run_route(messages, route):
                         produced = True
                         yield piece
+                    gemini.mark_healthy(route.model)
                     return
                 except Exception as exc:  # BaseException (cancel/close) passes through
                     if (not produced and gemini.is_thinking_rejected(exc)
@@ -131,14 +136,27 @@ class LLM:
                 if err.code == "timeout":
                     # A stall will not fix itself by waiting: change approach now.
                     if route.mode == "stream" and not settings.is_anthropic:
-                        plan.insert(0, _Route(route.model, "once"))
+                        once = _Route(route.model, "once")
+                        if plan:
+                            plan.append(once)  # backup model first, this one last
+                        else:
+                            plan.insert(0, once)
                     break
+                if plan:
+                    # Another model is waiting. Google's own message for a 503 is
+                    # "spikes are usually temporary" and a 429 quota error is per
+                    # model: hammering the same model only burns the user's time.
+                    if err.code == "rate_limited" or retries >= 1:
+                        break
                 if retries >= settings.llm_max_retries:
                     break
                 retries += 1
-                delay = min(8.0, 0.6 * (2 ** (retries - 1))) + random.uniform(0, 0.4)
+                # 1.5 s, 3 s (+jitter): long enough for a short demand spike.
+                delay = min(8.0, 1.5 * (2 ** (retries - 1))) + random.uniform(0, 0.4)
                 log.info("retrying chat (attempt %d) in %.1fs", retries, delay)
                 await asyncio.sleep(delay)
+            # Only reachable by giving up on this route.
+            gemini.mark_unhealthy(route.model)
             if plan:
                 log.warning("failing over: %s/%s -> %s/%s",
                             route.model, route.mode, plan[0].model, plan[0].mode)

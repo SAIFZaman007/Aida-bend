@@ -6,6 +6,7 @@ speech-to-text and text-to-speech. Provider/SDK exceptions are translated to
 """
 import asyncio
 import logging
+import time
 
 import httpx
 from google import genai
@@ -50,6 +51,36 @@ async def aclose() -> None:
 # model (e.g. gemini-3.8-flash has no "minimal"), so instead of failing every
 # request we drop thinking_config for that model once and keep working.
 _NO_THINKING: set[str] = set()
+
+
+# Circuit breaker. When a model stalls, is overloaded (503) or out of quota (429),
+# every following request would wait the full timeout again. Instead the model is
+# remembered as unhealthy for `llm_cooldown_seconds` and a healthy backup is
+# tried first. Per process, in memory: a restart simply forgets it.
+_UNHEALTHY: dict[str, float] = {}
+
+
+def mark_unhealthy(model: str) -> None:
+    _UNHEALTHY[model] = time.monotonic() + settings.llm_cooldown_seconds
+
+
+def mark_healthy(model: str) -> None:
+    _UNHEALTHY.pop(model, None)
+
+
+def is_unhealthy(model: str) -> bool:
+    until = _UNHEALTHY.get(model)
+    if until is None:
+        return False
+    if time.monotonic() >= until:
+        _UNHEALTHY.pop(model, None)
+        return False
+    return True
+
+
+def order_models(models: list[str]) -> list[str]:
+    """Healthy models first, otherwise the configured order (stable)."""
+    return sorted(models, key=is_unhealthy)
 
 
 def thinking_config(level: str) -> "types.ThinkingConfig | None":

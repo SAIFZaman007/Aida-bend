@@ -171,9 +171,8 @@ async def test_stall_everywhere_then_fallback_model(monkeypatch):
         [stream_of(Chunk("late"), delay=1.0), stream_of(Chunk("from backup"))], [3.0])
     use(monkeypatch, client)
     assert await collect() == ["from backup"]
-    assert calls["models"] == [("stream", settings.gemini_chat_model),
-                               ("once", settings.gemini_chat_model),
-                               ("stream", "backup-m")]
+    # A stall goes to the backup model first; the same model without streaming is last.
+    assert calls["models"] == [("stream", settings.gemini_chat_model), ("stream", "backup-m")]
 
 
 async def test_timeout_when_every_route_stalls(monkeypatch):
@@ -272,3 +271,71 @@ async def test_embed_times_out_gracefully(monkeypatch):
     monkeypatch.setattr(gemini, "get_client", lambda: types.SimpleNamespace(
         aio=types.SimpleNamespace(models=types.SimpleNamespace(embed_content=slow))))
     assert await LLM().embed("x") is None
+
+
+# ---- overload / quota failover (production incident: 503 "high demand" then 429)
+async def test_quota_error_fails_over_to_backup_immediately(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_fallback_model", "backup-m")
+    client, calls = fake_client([api_error(429), stream_of(Chunk("from backup"))])
+    use(monkeypatch, client)
+    assert await collect() == ["from backup"]
+    assert calls["models"] == [("stream", settings.gemini_chat_model), ("stream", "backup-m")]
+
+
+async def test_overload_503_gets_one_retry_then_backup(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_fallback_model", "backup-m")
+    client, calls = fake_client([api_error(503), api_error(503), stream_of(Chunk("ok"))])
+    use(monkeypatch, client)
+    assert await collect() == ["ok"]
+    assert [m for _, m in calls["models"]] == [settings.gemini_chat_model] * 2 + ["backup-m"]
+
+
+async def test_without_backup_503_still_retries_same_model(monkeypatch):
+    client, calls = fake_client([api_error(503), api_error(503), stream_of(Chunk("ok"))])
+    use(monkeypatch, client)
+    assert await collect() == ["ok"] and calls["n"] == 3
+
+
+async def test_both_models_down_raises_last_error(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_fallback_model", "backup-m")
+    client, _ = fake_client([api_error(503)])
+    use(monkeypatch, client)
+    with pytest.raises(AidaError) as ei:
+        await collect()
+    assert ei.value.code == "unavailable"
+
+
+async def test_stalled_primary_then_backup_then_non_streaming_last_resort(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_fallback_model", "backup-m")
+    client, calls = fake_client(
+        [stream_of(Chunk("late"), delay=1.0), api_error(503), api_error(503)],
+        [once_response("last resort")])
+    use(monkeypatch, client)
+    assert await collect() == ["last resort"]
+    assert calls["models"][0] == ("stream", settings.gemini_chat_model)
+    assert calls["models"][-1] == ("once", settings.gemini_chat_model)
+
+
+async def test_failed_model_is_skipped_for_the_next_request(monkeypatch):
+    # The live-demo fix: after the primary failed, the next question must not
+    # wait for it again; the healthy backup answers first.
+    monkeypatch.setattr(settings, "gemini_fallback_model", "backup-m")
+    client, calls = fake_client([api_error(429), stream_of(Chunk("one")), stream_of(Chunk("two"))])
+    use(monkeypatch, client)
+    assert await collect() == ["one"]
+    assert gemini.is_unhealthy(settings.gemini_chat_model)
+    assert await collect() == ["two"]
+    assert [m for _, m in calls["models"]] == [settings.gemini_chat_model, "backup-m", "backup-m"]
+
+
+async def test_model_recovers_after_cooldown(monkeypatch):
+    monkeypatch.setattr(settings, "llm_cooldown_seconds", 0.0)
+    gemini.mark_unhealthy("m1")
+    assert not gemini.is_unhealthy("m1")
+    monkeypatch.setattr(settings, "llm_cooldown_seconds", 60.0)
+    gemini.mark_unhealthy("m1")
+    assert gemini.is_unhealthy("m1")
+    gemini.mark_healthy("m1")
+    assert gemini.order_models(["m1", "m2"]) == ["m1", "m2"]
+    gemini.mark_unhealthy("m1")
+    assert gemini.order_models(["m1", "m2"]) == ["m2", "m1"]

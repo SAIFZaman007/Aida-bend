@@ -20,7 +20,7 @@ from src.core.errors import http_detail, request_lang
 from src.core.llm import llm
 from src.voice.router import router as voice_router
 
-VERSION = "2.2.0"
+VERSION = "2.2.2"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +51,13 @@ async def _check_models() -> None:
     wanted = {settings.gemini_embed_model}
     if not settings.is_anthropic:
         wanted.add(settings.gemini_chat_model)
+        wanted.update(m for m in (settings.fallback_model, settings.stt_fallback_model) if m)
+        if not settings.fallback_model:
+            log.warning(
+                "GEMINI_FALLBACK_MODEL is empty: when %s is overloaded or out of quota "
+                "there is no backup and chat/voice will fail. Set a second model.",
+                settings.gemini_chat_model,
+            )
     for model in sorted(wanted):
         try:
             await asyncio.wait_for(client.aio.models.get(model=model), 8)

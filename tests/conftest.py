@@ -15,6 +15,14 @@ import pytest  # noqa: E402
 from src.core import redis_client  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _reset_model_health():
+    from src.core import gemini
+    gemini._UNHEALTHY.clear()
+    yield
+    gemini._UNHEALTHY.clear()
+
+
 @pytest.fixture
 def fake_redis():
     """Replace the Redis client with an in-process fake."""

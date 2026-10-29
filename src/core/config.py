@@ -82,8 +82,9 @@ class Settings(BaseSettings):
     anthropic_max_tokens: int = 2048
 
     # --- Reliability ---
-    llm_first_token_timeout: float = 15.0  # seconds until the first token (stream)
-    llm_once_timeout: float = 25.0         # whole non-streaming fallback call
+    llm_first_token_timeout: float = 10.0  # seconds until the first token (stream)
+    llm_once_timeout: float = 20.0         # whole non-streaming fallback call
+    llm_cooldown_seconds: float = 60.0   # a model that just failed is tried last for this long
     llm_idle_timeout: float = 30.0         # max silence between tokens
     llm_max_retries: int = 2               # transient errors, only pre-first-token
     embed_timeout: float = 10.0
@@ -92,6 +93,7 @@ class Settings(BaseSettings):
     # --- Voice: speech-to-text (Gemini audio understanding) ---
     gemini_stt_model: str = "gemini-3.8-flash"
     gemini_stt_thinking_level: str = "low"  # 3.8-flash: low|medium|high (no "minimal")
+    gemini_stt_fallback_model: str = ""     # empty -> GEMINI_FALLBACK_MODEL is used
     max_audio_bytes: int = 10 * 1024 * 1024
 
     # --- Voice: text-to-speech (Gemini TTS; auto-detects Bangla/English) ---
@@ -162,6 +164,11 @@ class Settings(BaseSettings):
     def fallback_model(self) -> str:
         """Backup chat model (Gemini only); '' when none is configured."""
         return "" if self.is_anthropic else self.gemini_fallback_model.strip()
+
+    @property
+    def stt_fallback_model(self) -> str:
+        """Backup speech-to-text model: its own setting, else the chat fallback."""
+        return self.gemini_stt_fallback_model.strip() or self.fallback_model
 
     def model_for_persona(self, persona: str) -> str:
         """Pick the chat vs. coder model based on persona."""

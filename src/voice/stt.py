@@ -6,6 +6,7 @@ task (verbatim transcript only, script follows the spoken language, an explicit
 sentinel for "no speech") and `clean_transcript()` enforces it again on output.
 The browser-side VAD in lib/voice.js already drops silence before upload.
 """
+import logging
 import re
 
 from google.genai import types
@@ -13,6 +14,8 @@ from google.genai import types
 from src.core import gemini
 from src.core.config import settings
 from src.core.errors import AidaError
+
+log = logging.getLogger("aida.voice")
 
 NO_SPEECH = "<NO_SPEECH>"
 
@@ -52,11 +55,9 @@ def clean_transcript(raw: str) -> str:
     return t
 
 
-async def transcribe(data: bytes, mime: str) -> str:
-    client = gemini.get_client()
-    model = settings.gemini_stt_model
-    resp = None
-    for attempt in (1, 2):
+async def _transcribe_with(client, model: str, data: bytes, mime: str, *, attempts: int):
+    """One model, `attempts` tries (plus a free self-heal if the thinking level is refused)."""
+    for heal in (False, True):
         cfg = types.GenerateContentConfig(
             system_instruction=_SYSTEM,
             max_output_tokens=1024,
@@ -72,15 +73,40 @@ async def transcribe(data: bytes, mime: str) -> str:
             )
 
         try:
-            resp = await gemini.call_with_retry(call, timeout=20.0)
-            break
+            return await gemini.call_with_retry(call, timeout=20.0, attempts=attempts)
         except AidaError as err:
             cause = err.__cause__
             # Self-heal: the model refused our thinking level -> retry without it.
-            if (attempt == 1 and cause is not None and gemini.is_thinking_rejected(cause)
+            if (not heal and cause is not None and gemini.is_thinking_rejected(cause)
                     and gemini.mark_no_thinking(model)):
                 continue
             raise
+    raise AidaError("internal", "unreachable")
+
+
+async def transcribe(data: bytes, mime: str) -> str:
+    client = gemini.get_client()
+    models = [settings.gemini_stt_model]
+    backup = settings.stt_fallback_model
+    if backup and backup not in models:
+        models.append(backup)
+    models = gemini.order_models(models)  # skip a model that just failed
+
+    resp = None
+    for i, model in enumerate(models):
+        last_model = i == len(models) - 1
+        try:
+            # With a backup model waiting, fail over after one try instead of
+            # retrying a model that Google says is overloaded.
+            resp = await _transcribe_with(client, model, data, mime, attempts=2 if last_model else 1)
+            gemini.mark_healthy(model)
+            break
+        except AidaError as err:
+            if err.retryable:
+                gemini.mark_unhealthy(model)
+            if last_model or not err.retryable:
+                raise
+            log.warning("stt failing over: %s -> %s (%s)", model, models[i + 1], err.code)
     try:
         raw = resp.text or ""
     except Exception:
