@@ -1,10 +1,22 @@
-"""Speech-to-text via Gemini audio understanding (Bengali + English).
+"""Speech-to-text (Bengali + English) — per-clip path.
 
-Why the strict prompt: generative models asked to "transcribe" can drift into
-answering, translating or inventing text on silence/noise. The prompt pins the
-task (verbatim transcript only, script follows the spoken language, an explicit
-sentinel for "no speech") and `clean_transcript()` enforces it again on output.
-The browser-side VAD in lib/voice.js already drops silence before upload.
+Two kinds of model are supported, chosen by name:
+
+  * DEDICATED transcription models (`gemini-3.5-transcribe`, documented at
+    ai.google.dev/gemini-api/docs/models/gemini-3.5-transcribe). They take the
+    audio and return only the transcript; language is auto-detected, including
+    Bengali/English code-switching. They accept no thinking/system prompt, so
+    none is sent.
+  * GENERAL models (e.g. `gemini-3.7-flash`), used as a backup. A strict prompt
+    pins the task (verbatim transcript only, script follows the spoken
+    language, an explicit sentinel for "no speech") because generative models
+    asked to "transcribe" can drift into answering or inventing text on noise.
+
+`clean_transcript()` enforces the contract on every result either way. The
+browser-side VAD already drops silence before upload.
+
+The live (streaming) path lives in voice/live_stt.py; this module is its
+fallback and the path used when streaming is disabled.
 """
 import logging
 import re
@@ -44,6 +56,20 @@ def safe_mime(content_type: str | None) -> str:
     return base if base in _ALLOWED_MIME else "audio/webm"
 
 
+def is_dedicated(model: str) -> bool:
+    """True for the purpose-built transcription models (file or live)."""
+    return "transcribe" in (model or "").lower()
+
+
+def audio_transcription_config() -> types.AudioTranscriptionConfig:
+    """Shared by the per-clip and the live path: auto language detection unless
+    STT_LANGUAGES pins hints; SMART mode removes fillers and fixes punctuation."""
+    return types.AudioTranscriptionConfig(
+        language_codes=settings.stt_language_codes,  # [] = automatic detection
+        mode=settings.stt_mode,
+    )
+
+
 def clean_transcript(raw: str) -> str:
     t = (raw or "").strip()
     if not t or NO_SPEECH in t:
@@ -55,21 +81,32 @@ def clean_transcript(raw: str) -> str:
     return t
 
 
+def _request(model: str, data: bytes, mime: str):
+    """(contents, config) for `model`, in the style that model family expects."""
+    audio = types.Part.from_bytes(data=data, mime_type=mime)
+    if is_dedicated(model):
+        cfg = types.GenerateContentConfig(
+            audio_transcription_config=audio_transcription_config(),
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        )
+        return [audio], cfg
+    cfg = types.GenerateContentConfig(
+        system_instruction=_SYSTEM,
+        max_output_tokens=1024,
+        thinking_config=gemini.thinking_config_for(model, settings.gemini_stt_thinking_level),
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+    )
+    return [audio, "Transcribe this audio."], cfg
+
+
 async def _transcribe_with(client, model: str, data: bytes, mime: str, *, attempts: int):
     """One model, `attempts` tries (plus a free self-heal if the thinking level is refused)."""
     for heal in (False, True):
-        cfg = types.GenerateContentConfig(
-            system_instruction=_SYSTEM,
-            max_output_tokens=1024,
-            thinking_config=gemini.thinking_config_for(model, settings.gemini_stt_thinking_level),
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        )
+        contents, cfg = _request(model, data, mime)
 
-        async def call(cfg=cfg):
+        async def call(contents=contents, cfg=cfg):
             return await client.aio.models.generate_content(
-                model=model,
-                contents=[types.Part.from_bytes(data=data, mime_type=mime), "Transcribe this audio."],
-                config=cfg,
+                model=model, contents=contents, config=cfg
             )
 
         try:
@@ -84,13 +121,18 @@ async def _transcribe_with(client, model: str, data: bytes, mime: str, *, attemp
     raise AidaError("internal", "unreachable")
 
 
-async def transcribe(data: bytes, mime: str) -> str:
-    client = gemini.get_client()
+def stt_models() -> list[str]:
+    """Primary then backup, healthy ones first."""
     models = [settings.gemini_stt_model]
     backup = settings.stt_fallback_model
     if backup and backup not in models:
         models.append(backup)
-    models = gemini.order_models(models)  # skip a model that just failed
+    return gemini.order_models(models)
+
+
+async def transcribe(data: bytes, mime: str) -> str:
+    client = gemini.get_client()
+    models = stt_models()
 
     resp = None
     for i, model in enumerate(models):

@@ -20,7 +20,7 @@ from src.core.errors import http_detail, request_lang
 from src.core.llm import llm
 from src.voice.router import router as voice_router
 
-VERSION = "2.2.2"
+VERSION = "2.3.0"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +51,9 @@ async def _check_models() -> None:
     wanted = {settings.gemini_embed_model}
     if not settings.is_anthropic:
         wanted.add(settings.gemini_chat_model)
-        wanted.update(m for m in (settings.fallback_model, settings.stt_fallback_model) if m)
+        wanted.update(m for m in (settings.fallback_model, settings.stt_fallback_model,
+                                  settings.gemini_stt_model, settings.gemini_tts_model,
+                                  settings.tts_fallback_model) if m)
         if not settings.fallback_model:
             log.warning(
                 "GEMINI_FALLBACK_MODEL is empty: when %s is overloaded or out of quota "
@@ -74,7 +76,7 @@ async def lifespan(app: FastAPI):
     await _check_models()
     log.info(
         "AIDA backend ready v%s  provider=%s  chat=%s  fallback=%s  thinking=%s/%s  "
-        "coder=%s  stt=%s  tts=%s  embed=%s  db=postgres+pgvector  cache=%s",
+        "coder=%s  stt=%s  stt_live=%s  tts=%s  tts_backup=%s  embed=%s  db=postgres+pgvector  cache=%s",
         VERSION,
         settings.llm_provider,
         settings.chat_model,
@@ -83,7 +85,9 @@ async def lifespan(app: FastAPI):
         settings.gemini_stt_thinking_level or "default",
         settings.coder_model,
         settings.gemini_stt_model,
+        settings.gemini_stt_live_model if settings.stt_live_enabled else "off",
         settings.gemini_tts_model,
+        settings.tts_fallback_model or "-",
         settings.gemini_embed_model,
         "redis" if redis_ok else "DISABLED (Postgres fallback)",
     )
@@ -106,7 +110,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
-    expose_headers=["X-Request-ID", "Retry-After"],
+    expose_headers=["X-Request-ID", "Retry-After", "X-Sample-Rate", "X-Audio-Format"],
     max_age=600,
 )
 
@@ -157,7 +161,13 @@ async def health() -> dict:
         "provider": settings.llm_provider,
         "model": settings.chat_model,
         "coder_model": settings.coder_model,
-        "voice": {"stt": settings.gemini_stt_model, "tts": settings.gemini_tts_model},
+        "voice": {
+            "stt": settings.gemini_stt_model,
+            "stt_live": settings.gemini_stt_live_model if settings.stt_live_enabled else None,
+            "tts": settings.gemini_tts_model,
+            "tts_backup": settings.tts_fallback_model or None,
+            "stream": True,
+        },
         "languages": ["bn", "en"],
         # Reports whether a key is configured — never the key itself.
         "ai_configured": bool(settings.gemini_api_key),

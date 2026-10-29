@@ -25,6 +25,7 @@ v2.1 fixes (all reproduced with tests/test_history.py):
 """
 import asyncio
 import logging
+import time
 from collections.abc import AsyncGenerator
 
 from sqlalchemy import select
@@ -151,7 +152,9 @@ async def stream_reply(
         conv_id, {"role": "user", "content": user_text}
     )
 
+    t0 = time.perf_counter()
     messages = await build_messages(session, conv, user_text, history)
+    t_ctx = time.perf_counter() - t0  # history + memory recall, before the model is called
 
     parts: list[str] = []
     segmenter = SentenceSegmenter()
@@ -170,6 +173,9 @@ async def stream_reply(
 
     try:
         async for piece in llm.stream_chat(messages, persona=persona):
+            if not parts:
+                log.info("chat first-token ttft=%.2fs (context %.2fs) persona=%s",
+                         time.perf_counter() - t0, t_ctx, persona)
             parts.append(piece)
             yield {"type": "token", "t": piece}
             for evt in sentence_events(segmenter.feed(piece)):
@@ -178,6 +184,8 @@ async def stream_reply(
         for evt in sentence_events(segmenter.flush()):
             yield evt
         completed = True
+        log.info("chat done total=%.2fs chars=%d sentences=%d",
+                 time.perf_counter() - t0, len("".join(parts)), sentence_index)
     finally:
         # Runs on success, provider error AND client disconnect (cancellation).
         reply = "".join(parts).strip()

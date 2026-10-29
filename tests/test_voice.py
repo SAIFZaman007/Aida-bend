@@ -72,6 +72,7 @@ async def test_synthesize_uses_language_specific_voice(monkeypatch):
 
 
 async def test_synthesize_retries_then_rejects_silent_audio(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_tts_fallback_model", "")
     calls = []
     monkeypatch.setattr(gemini, "get_client", lambda: tts_client(make_wav(2.0, tone=False), calls))
     with pytest.raises(AidaError) as ei:
@@ -101,6 +102,7 @@ def test_safe_mime():
 
 
 async def test_transcribe_sends_audio_and_strict_prompt(monkeypatch):
+    monkeypatch.setattr(settings, "gemini_stt_model", "gemini-3.7-flash")  # general-model path
     seen = {}
     async def generate_content(*, model, contents, config):
         seen.update(model=model, contents=contents, config=config)
@@ -109,7 +111,7 @@ async def test_transcribe_sends_audio_and_strict_prompt(monkeypatch):
         aio=types.SimpleNamespace(models=types.SimpleNamespace(generate_content=generate_content))))
     assert await stt.transcribe(b"\x00" * 3000, "audio/webm") == "আমি ভালো আছি"
     assert "<NO_SPEECH>" in seen["config"].system_instruction
-    assert seen["model"] == settings.gemini_stt_model
+    assert seen["model"] == "gemini-3.7-flash"
 
 
 async def test_stt_default_thinking_level_is_valid_for_gemini_3_8_flash():
@@ -119,6 +121,7 @@ async def test_stt_default_thinking_level_is_valid_for_gemini_3_8_flash():
 
 async def test_transcribe_self_heals_when_thinking_level_rejected(monkeypatch):
     from google.genai import errors as genai_errors
+    monkeypatch.setattr(settings, "gemini_stt_model", "gemini-3.7-flash")  # general-model path
     gemini._NO_THINKING.clear()
     seen = []
     async def generate_content(*, model, contents, config):

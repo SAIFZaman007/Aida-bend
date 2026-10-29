@@ -91,19 +91,31 @@ def _build_input(text: str) -> list[dict]:
     return [{"type": "user_input", "content": [block]}]
 
 
-async def _synthesize_once(text: str, voice: str) -> bytes:
+def tts_models() -> list[str]:
+    """Main voice model, then the backup; one that just failed goes last."""
+    models = [settings.gemini_tts_model]
+    if settings.tts_fallback_model:
+        models.append(settings.tts_fallback_model)
+    return gemini.order_models(models)
+
+
+def _interaction_args(model: str, text: str, voice: str) -> dict:
+    return dict(
+        model=model,
+        input=_build_input(text),
+        response_format={"type": "audio"},
+        generation_config={"speech_config": [{"voice": voice}]},
+    )
+
+
+async def _synthesize_once(text: str, voice: str, model: str, *, attempts: int = 2) -> bytes:
     client = gemini.get_client()
 
     async def call():
-        return await client.aio.interactions.create(
-            model=settings.gemini_tts_model,
-            input=_build_input(text),
-            response_format={"type": "audio"},
-            generation_config={"speech_config": [{"voice": voice}]},
-        )
+        return await client.aio.interactions.create(**_interaction_args(model, text, voice))
 
     async with _semaphore():
-        interaction = await gemini.call_with_retry(call, timeout=30.0)
+        interaction = await gemini.call_with_retry(call, timeout=20.0, attempts=attempts)
     audio = getattr(interaction, "output_audio", None)
     data = getattr(audio, "data", None) if audio is not None else None
     if not data:
@@ -113,16 +125,119 @@ async def _synthesize_once(text: str, voice: str) -> bytes:
 
 
 async def synthesize(text: str, gender: str = "female") -> tuple[bytes, float]:
-    """Return (wav_bytes, duration_seconds) for `text` in the matching voice."""
+    """Return (wav_bytes, duration_seconds) for `text` in the matching voice.
+    Fails over to the backup voice model when the main one is overloaded."""
     voice = settings.tts_voice(gender, dominant_language(text))
+    models = tts_models()
     last: AidaError | None = None
-    for attempt in (1, 2):
-        wav = await _synthesize_once(text, voice)
-        duration, rms = wav_info(wav)
-        if is_plausible(text, duration, rms):
-            return wav, duration
-        last = AidaError(
-            "unavailable", f"implausible audio (dur={duration:.2f}s rms={rms:.4f})"
-        )
-        log.warning("TTS result rejected on attempt %d: %s", attempt, last.detail)
-    raise last  # type: ignore[misc]
+    for i, model in enumerate(models):
+        more = i + 1 < len(models)
+        try:
+            for attempt in (1, 2):
+                wav = await _synthesize_once(text, voice, model, attempts=1 if more else 2)
+                duration, rms = wav_info(wav)
+                if is_plausible(text, duration, rms):
+                    gemini.mark_healthy(model)
+                    return wav, duration
+                last = AidaError(
+                    "unavailable", f"implausible audio (dur={duration:.2f}s rms={rms:.4f})"
+                )
+                log.warning("TTS result rejected on attempt %d: %s", attempt, last.detail)
+        except AidaError as err:
+            last = err
+            if not err.retryable:
+                raise
+        gemini.mark_unhealthy(model)
+        if more:
+            log.warning("tts failing over: %s -> %s", model, models[i + 1])
+    raise last or AidaError("unavailable", "no voice model succeeded")
+
+
+# ----------------------------------------------------------------- streaming
+async def _stream_model(model: str, text: str, voice: str, info: dict):
+    """Yield raw PCM (16-bit LE mono) from one model as Google generates it.
+
+    Interactions API with stream=True: each `step.delta` event whose delta type
+    is "audio" carries a base64 chunk of headerless 24 kHz PCM (Google docs:
+    ai.google.dev/gemini-api/docs/speech-generation). First audio can arrive
+    within a fraction of the time a whole-clip request needs.
+    """
+    client = gemini.get_client()
+    async with _semaphore():
+        try:
+            stream = await asyncio.wait_for(
+                client.aio.interactions.create(
+                    **_interaction_args(model, text, voice), stream=True),
+                settings.tts_first_audio_timeout,
+            )
+        except Exception as exc:
+            raise gemini.map_exception(exc) from exc
+        it = stream.__aiter__()
+        first, carry, produced = True, b"", False
+        try:
+            while True:
+                wait = settings.tts_first_audio_timeout if first else settings.tts_idle_timeout
+                try:
+                    event = await asyncio.wait_for(it.__anext__(), wait)
+                except StopAsyncIteration:
+                    break
+                except Exception as exc:
+                    raise gemini.map_exception(exc) from exc
+                if getattr(event, "event_type", None) != "step.delta":
+                    continue
+                delta = getattr(event, "delta", None)
+                if getattr(delta, "type", None) != "audio" or not getattr(delta, "data", None):
+                    continue
+                raw = base64.b64decode(delta.data)
+                if first and raw[:4] == b"RIFF":  # defensive: a WAV header slipped in
+                    raw = raw[44:]
+                rate = getattr(delta, "sample_rate", None)
+                if rate:
+                    info["sample_rate"] = int(rate)
+                buf = carry + raw
+                usable = len(buf) - (len(buf) % 2)  # never split a 16-bit sample
+                carry = buf[usable:]
+                if usable:
+                    first = False
+                    produced = True
+                    yield buf[:usable]
+        finally:
+            aclose = getattr(stream, "aclose", None) or getattr(stream, "close", None)
+            if aclose:
+                try:
+                    res = aclose()
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    pass
+        if not produced:
+            raise AidaError("unavailable", "TTS stream carried no audio")
+
+
+async def synthesize_stream(text: str, gender: str, info: dict):
+    """Async generator of PCM chunks. Falls over to the backup voice model only
+    BEFORE the first byte (so the listener never hears two voices); after that a
+    failure just ends the clip. `info["sample_rate"]` is filled in as known."""
+    voice = settings.tts_voice(gender, dominant_language(text))
+    info.setdefault("sample_rate", settings.tts_sample_rate)
+    models = tts_models()
+    last: AidaError | None = None
+    for i, model in enumerate(models):
+        started = False
+        try:
+            async for chunk in _stream_model(model, text, voice, info):
+                started = True
+                yield chunk
+            gemini.mark_healthy(model)
+            return
+        except AidaError as err:
+            if started:
+                log.warning("tts stream cut mid-clip (%s): %s", err.code, err.detail[:120])
+                return
+            last = err
+            if not err.retryable:
+                raise
+            gemini.mark_unhealthy(model)
+            if i + 1 < len(models):
+                log.warning("tts failing over: %s -> %s (%s)", model, models[i + 1], err.code)
+    raise last or AidaError("unavailable", "no voice model succeeded")

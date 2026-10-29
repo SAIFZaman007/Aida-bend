@@ -91,13 +91,30 @@ class Settings(BaseSettings):
     sse_heartbeat_seconds: float = 15.0
 
     # --- Voice: speech-to-text (Gemini audio understanding) ---
-    gemini_stt_model: str = "gemini-3.8-flash"
-    gemini_stt_thinking_level: str = "low"  # 3.8-flash: low|medium|high (no "minimal")
+    # Dedicated transcription models (Google docs: ai.google.dev/gemini-api/docs/models/
+    # gemini-3.5-transcribe): the file model answers one clip per request; the
+    # "-live" model streams interim + final text over the Live API (WebSocket)
+    # while the person is still speaking. Both auto-detect Bengali and English.
+    gemini_stt_model: str = "gemini-3.5-transcribe"
+    gemini_stt_live_model: str = "gemini-3.5-transcribe-live"
+    stt_live_enabled: bool = True           # false = always use the per-clip path
+    gemini_stt_mode: str = "SMART"          # SMART (clean punctuation) | VERBATIM
+    stt_languages: str = ""                 # optional BCP-47 hints, e.g. "bn-BD,en-US"; empty = auto
+    gemini_stt_thinking_level: str = "low"  # only for a general model used as STT backup
     gemini_stt_fallback_model: str = ""     # empty -> GEMINI_FALLBACK_MODEL is used
     max_audio_bytes: int = 10 * 1024 * 1024
+    stt_live_max_utterance_seconds: int = 30
+    stt_live_session_seconds: int = 540     # Google caps a live session at 10 min: recycle before
+    stt_live_final_wait: float = 0.9        # longest wait for the final text after the person stops
+    stt_live_final_settle: float = 0.3      # once a FINAL segment is in, wait this long for more
 
     # --- Voice: text-to-speech (Gemini TTS; auto-detects Bangla/English) ---
     gemini_tts_model: str = "gemini-3.8-flash-tts"
+    # Documented lighter/faster sibling, used automatically when the main voice
+    # model is overloaded or out of quota. Empty = no voice failover.
+    gemini_tts_fallback_model: str = "gemini-3.8-flash-lite-tts"
+    tts_first_audio_timeout: float = 8.0   # no first audio byte by then -> fail over
+    tts_idle_timeout: float = 10.0         # silence between audio chunks
     tts_voice_female: str = "Kore"
     tts_voice_male: str = "Charon"
     # Optional per-language overrides (e.g. a Bangla voice from the Extended
@@ -164,6 +181,19 @@ class Settings(BaseSettings):
     def fallback_model(self) -> str:
         """Backup chat model (Gemini only); '' when none is configured."""
         return "" if self.is_anthropic else self.gemini_fallback_model.strip()
+
+    @property
+    def stt_language_codes(self) -> list[str]:
+        return [c.strip() for c in self.stt_languages.split(",") if c.strip()]
+
+    @property
+    def stt_mode(self) -> str:
+        return "VERBATIM" if self.gemini_stt_mode.strip().upper() == "VERBATIM" else "SMART"
+
+    @property
+    def tts_fallback_model(self) -> str:
+        m = self.gemini_tts_fallback_model.strip()
+        return "" if m == self.gemini_tts_model else m
 
     @property
     def stt_fallback_model(self) -> str:
