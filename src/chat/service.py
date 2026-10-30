@@ -99,29 +99,86 @@ def wants_recall(user_text: str) -> bool:
     return (len(t) >= 12 and len(t.split()) >= 3) or len(t) >= 24
 
 
+class RecallPacer:
+    """Stops paying for memory lookups that keep missing their time budget.
+
+    Recall needs an embedding round trip to Google; on some keys/networks that alone takes
+    longer than `memory_recall_timeout`, so EVERY turn used to wait the whole budget and
+    then go without the notes anyway. After `MISS_LIMIT` misses in a row recall is paused
+    for `PAUSE_S` seconds (no wait, no embedding call), then ONE attempt decides whether it
+    has become fast enough again (a single miss pauses it again). Per process, in memory."""
+
+    MISS_LIMIT = 3
+    PAUSE_S = 180.0
+
+    def __init__(self) -> None:
+        self.misses = 0
+        self.paused_until = 0.0
+
+    def active(self) -> bool:
+        return time.monotonic() >= self.paused_until
+
+    def hit(self) -> None:
+        self.misses = 0
+
+    def miss(self) -> None:
+        self.misses += 1
+        if self.misses >= self.MISS_LIMIT:
+            self.paused_until = time.monotonic() + self.PAUSE_S
+            self.misses = self.MISS_LIMIT - 1  # after the pause, one more miss pauses it again
+            log.info("memory recall paused for %.0fs: it keeps taking longer than %.1fs",
+                     self.PAUSE_S, settings.memory_recall_timeout)
+
+
+recall_pacer = RecallPacer()
+RECALL_HARD_LIMIT_S = 8.0
+
+
 async def _recall_isolated(project_id: str, persona: str, user_text: str) -> list[str]:
     """Recall on its OWN session: it runs while the request session is busy saving the
     user turn (one AsyncSession must never be used by two coroutines at once)."""
     try:
         async with SessionLocal() as s:
-            return await memory.recall(s, project_id, user_text, persona=persona)
+            # A lookup that missed its budget keeps running (see _collect_recall): bound it.
+            return await asyncio.wait_for(
+                memory.recall(s, project_id, user_text, persona=persona), RECALL_HARD_LIMIT_S)
     except Exception:
         log.debug("memory recall failed", exc_info=True)
         return []
 
 
+def _log_late_recall(started: float):
+    def cb(task: "asyncio.Task") -> None:
+        if task.cancelled():
+            return
+        try:
+            n = len(task.result())
+        except Exception:
+            return
+        log.info("memory recall was late: finished after %.2fs with %d note(s) (budget %.1fs)",
+                 time.perf_counter() - started, n, settings.memory_recall_timeout)
+    return cb
+
+
 async def _collect_recall(task: "asyncio.Task | None", started: float) -> list[str]:
-    """The recalled notes if they are ready within what is left of the budget."""
+    """The recalled notes if they are ready within what is left of the budget. A lookup
+    that misses is NOT cancelled: it finishes in the background (bounded by the embedding
+    timeout) so the log shows how long it really took."""
     if task is None:
         return []
     left = max(0.05, settings.memory_recall_timeout - (time.perf_counter() - started))
     done, _ = await asyncio.wait({task}, timeout=left)
     if task in done:
         try:
-            return task.result()
+            result = task.result()
         except Exception:
             return []
-    task.cancel()
+        recall_pacer.hit()
+        return result
+    recall_pacer.miss()
+    _bg_tasks.add(task)  # keep a reference: a bare task can be garbage-collected mid-run
+    task.add_done_callback(_bg_tasks.discard)
+    task.add_done_callback(_log_late_recall(started))
     log.info("memory recall skipped: not ready within %.1fs", settings.memory_recall_timeout)
     return []
 
@@ -193,7 +250,7 @@ async def stream_reply(
     # Recall starts NOW and overlaps with the database work below.
     recall_task = (
         asyncio.create_task(_recall_isolated(project_id, persona, user_text))
-        if wants_recall(user_text)
+        if wants_recall(user_text) and recall_pacer.active()
         else None
     )
     try:
@@ -209,9 +266,11 @@ async def stream_reply(
 
         recalled = await _collect_recall(recall_task, t0)
         messages = build_messages(conv, user_text, history, recalled, persona)
-    finally:
+    except BaseException:
+        # Request cancelled / failed before the lookup was collected: do not leave it running.
         if recall_task is not None and not recall_task.done():
             recall_task.cancel()
+        raise
     t_ctx = time.perf_counter() - t0  # history + save + recall, before the model is called
 
     parts: list[str] = []

@@ -21,6 +21,7 @@ import asyncio
 import logging
 import math
 import random
+import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
@@ -81,6 +82,18 @@ def _blocked(chunk) -> bool:
 class _Route:
     model: str
     mode: str  # "stream" (normal) | "once" (non-streaming fallback)
+
+
+def _log_usage(model: str, first_text_s: float | None, usage) -> None:
+    """One line per reply: Google's time to the first TEXT and what the model spent its
+    tokens on. `thoughts` is hidden reasoning: when it is large, the "Thinking" delay is
+    the model's own, and a lighter model (GEMINI_CHAT_MODEL) is the only real lever."""
+    def n(name: str) -> int:
+        v = getattr(usage, name, None) if usage is not None else None
+        return int(v) if isinstance(v, (int, float)) else 0
+    log.info("chat model=%s google-first-text=%s prompt=%d thoughts=%d output=%d tokens",
+             model, f"{first_text_s:.2f}s" if first_text_s is not None else "n/a",
+             n("prompt_token_count"), n("thoughts_token_count"), n("candidates_token_count"))
 
 
 class LLM:
@@ -196,12 +209,15 @@ class LLM:
     ) -> AsyncGenerator[str, None]:
         client = gemini.get_client()
         contents, cfg = self._gemini_request(messages, model)
+        t_req = time.perf_counter()
         stream = await client.aio.models.generate_content_stream(
             model=model, contents=contents, config=cfg
         )
         it = stream.__aiter__()
         got_text = False
         saw_block = False
+        usage = None
+        t_first = None
         try:
             while True:
                 timeout = settings.llm_idle_timeout if got_text else settings.llm_first_token_timeout
@@ -210,8 +226,11 @@ class LLM:
                 except StopAsyncIteration:
                     break
                 saw_block = saw_block or _blocked(chunk)
+                usage = getattr(chunk, "usage_metadata", None) or usage
                 text = _chunk_text(chunk)
                 if text:
+                    if t_first is None:
+                        t_first = time.perf_counter() - t_req
                     got_text = True
                     yield text
         finally:
@@ -225,6 +244,7 @@ class LLM:
             # Nothing produced: blocked content is final; an empty reply is a
             # transient provider hiccup worth a retry.
             raise AidaError("blocked" if saw_block else "unavailable", "empty response")
+        _log_usage(model, t_first, usage)
 
     async def _gemini_once(
         self, messages: list[dict], model: str

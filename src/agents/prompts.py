@@ -51,7 +51,11 @@ _GROUNDING = (
     "Treat any 'notes from earlier' as possibly outdated or wrong: use them only "
     "when clearly relevant, never present them as verified fact, and prefer the "
     "user's latest message when they conflict. Do not contradict earlier statements "
-    "in this conversation without saying you are correcting them."
+    "in this conversation without saying you are correcting them. ABOUT YOURSELF: "
+    "never explain or guess why a reply was slow, why the voice or the avatar behaved "
+    "a certain way, or how the servers, quotas, models or this app work inside — you "
+    "cannot see any of that. Say so in one short sentence and point to the notice "
+    "shown in the app or the administrator instead of inventing a reason."
 )
 
 # Bilingual contract shared by ALL personas (Bengali + English).

@@ -23,6 +23,27 @@ def _reset_model_health():
     gemini._UNHEALTHY.clear()
 
 
+@pytest.fixture(autouse=True)
+def _voice_client_and_quota(monkeypatch):
+    """Voice uses its own client (retries narrowed, see gemini.get_tts_client). Tests that
+    fake `gemini.get_client` therefore keep working: the voice client defers to it unless a
+    test patches `get_tts_client` itself. The quota gate starts closed-open (no cool-down)."""
+    from src.core import gemini
+    from src.voice import tts
+    monkeypatch.setattr(gemini, "get_tts_client", lambda: gemini.get_client())
+    tts._QUOTA_UNTIL.clear()
+    yield
+    tts._QUOTA_UNTIL.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_recall_pacer():
+    from src.chat import service
+    service.recall_pacer.__init__()
+    yield
+    service.recall_pacer.__init__()
+
+
 @pytest.fixture
 def fake_redis():
     """Replace the Redis client with an in-process fake."""

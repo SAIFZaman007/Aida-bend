@@ -221,8 +221,10 @@ async def test_speak_validation_and_failure_codes(client, monkeypatch):
         big = await c.post("/api/voice/speak", json={"text": "x" * (settings.max_tts_chars + 1)})
         assert big.status_code == 413
         r = await c.post("/api/voice/speak", json={"text": "Hello"})
-    assert r.status_code == 503 and "sk-123" not in r.text
+    # quota: 429 + Retry-After (the browser switches to the device voice at once)
+    assert r.status_code == 429 and "sk-123" not in r.text
     assert r.json()["detail"]["code"] == "rate_limited"
+    assert int(r.headers["retry-after"]) >= 1
 
 
 def _stt_client(monkeypatch, behaviour):

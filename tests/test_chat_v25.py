@@ -124,3 +124,58 @@ async def test_first_clause_reaches_the_client_before_the_sentence_ends(env):
     # the clause is released while the sentence is still being written
     assert sentences[0] == "Well, after looking at the numbers you sent," and len(sentences) >= 3
     assert "".join(sentences) == "Well, after looking at the numbers you sent, the most likely cause is a missing index, which makes every lookup scan all rows. Add it."
+
+
+# ---------------------------------------------------------------- recall pacing (v2.5.1)
+def test_pacer_pauses_after_repeated_misses_then_probes_once():
+    pacer = service.RecallPacer()
+    assert pacer.active()
+    pacer.miss(); pacer.miss()
+    assert pacer.active()
+    pacer.miss()
+    assert not pacer.active()
+    pacer.paused_until = time.monotonic() - 1          # the pause is over: one probe
+    assert pacer.active()
+    pacer.miss()                                        # still too slow: paused again at once
+    assert not pacer.active()
+    pacer.paused_until = 0
+    pacer.hit()
+    pacer.miss(); pacer.miss()
+    assert pacer.active()                               # a hit resets the count
+
+
+async def test_slow_recall_is_paused_so_later_turns_do_not_wait_at_all(env, monkeypatch):
+    monkeypatch.setattr(service.settings, "memory_recall_timeout", 0.05)
+    started = []
+
+    async def stuck(*a, **k):
+        started.append(1)
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(service.memory, "recall", stuck)
+    q = "how do I add an index to the messages table"
+    for _ in range(service.RecallPacer.MISS_LIMIT):
+        env.set_llm(["ok."])
+        await run(env, q)
+    assert len(started) == service.RecallPacer.MISS_LIMIT and not service.recall_pacer.active()
+    env.set_llm(["ok."])
+    t0 = time.perf_counter()
+    await run(env, q)
+    assert len(started) == service.RecallPacer.MISS_LIMIT, "no lookup (and no embedding call) while paused"
+    assert time.perf_counter() - t0 < 0.5
+
+
+async def test_a_late_recall_is_logged_not_discarded_silently(env, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="aida.chat")
+    monkeypatch.setattr(service.settings, "memory_recall_timeout", 0.05)
+
+    async def late(*a, **k):
+        await asyncio.sleep(0.2)
+        return ["a note"]
+
+    monkeypatch.setattr(service.memory, "recall", late)
+    env.set_llm(["ok."])
+    await run(env, "how do I add an index to the messages table")
+    assert not [m for m in env.captured["messages"] if "a note" in m["content"]]
+    await asyncio.sleep(0.4)
+    assert any("recall was late" in r.getMessage() and "1 note" in r.getMessage() for r in caplog.records)

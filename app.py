@@ -20,7 +20,7 @@ from src.core.errors import http_detail, request_lang
 from src.core.llm import llm
 from src.voice.router import router as voice_router
 
-VERSION = "2.5.0"
+VERSION = "2.5.1"
 
 logging.basicConfig(
     level=logging.INFO,

@@ -339,3 +339,15 @@ async def test_model_recovers_after_cooldown(monkeypatch):
     assert gemini.order_models(["m1", "m2"]) == ["m1", "m2"]
     gemini.mark_unhealthy("m1")
     assert gemini.order_models(["m1", "m2"]) == ["m2", "m1"]
+
+
+def test_usage_line_shows_where_the_time_and_tokens_went(caplog):
+    import types as _t
+    from src.core import llm as llm_mod
+    caplog.set_level("INFO", logger="aida.llm")
+    usage = _t.SimpleNamespace(prompt_token_count=812, thoughts_token_count=240, candidates_token_count=57)
+    llm_mod._log_usage("gemini-3.8-flash", 3.2149, usage)
+    llm_mod._log_usage("gemini-3.8-flash", None, None)      # never raises on missing data
+    msgs = [r.getMessage() for r in caplog.records]
+    assert "google-first-text=3.21s prompt=812 thoughts=240 output=57" in msgs[0]
+    assert "google-first-text=n/a prompt=0 thoughts=0 output=0" in msgs[1]

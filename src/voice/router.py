@@ -105,6 +105,12 @@ async def _synth(req: SpeakRequest, request: Request) -> tuple[bytes, float, str
     try:
         wav, duration = await tts.synthesize(text, req.gender)
     except AidaError as err:
+        if err.code == "rate_limited":
+            raise HTTPException(
+                429,
+                detail=http_detail(err.code, lang),
+                headers={"Retry-After": str(max(1, err.retry_after))},
+            )
         log.warning("speak failed code=%s detail=%s", err.code, err.detail[:200])
         raise HTTPException(503, detail=http_detail(err.code, lang))
     except Exception:
@@ -190,6 +196,14 @@ async def speak_stream(req: SpeakRequest, request: Request):
     try:
         first = await agen.__anext__()
     except AidaError as err:
+        if err.code == "rate_limited":
+            # Quota: say so plainly (429 + Retry-After) so the browser stops asking and
+            # speaks with the device voice at once. Already logged once by the quota gate.
+            raise HTTPException(
+                429,
+                detail=http_detail(err.code, lang),
+                headers={"Retry-After": str(max(1, err.retry_after))},
+            )
         log.warning("speak_stream failed code=%s detail=%s", err.code, err.detail[:200])
         raise HTTPException(503, detail=http_detail(err.code, lang))
     except StopAsyncIteration:

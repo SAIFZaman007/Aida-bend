@@ -13,6 +13,8 @@ import asyncio
 import base64
 import io
 import logging
+import math
+import time
 import wave
 
 from src.core import gemini
@@ -91,12 +93,54 @@ def _build_input(text: str) -> list[dict]:
     return [{"type": "user_input", "content": [block]}]
 
 
+# ------------------------------------------------------------- quota gate
+# Google answers "429 quota" in a fraction of a second. Asking again straight away only
+# repeats the refusal (and counts against the quota), so a model that said 429 is left
+# alone for the time Google names; requests in that window are refused instantly and the
+# browser takes over with its own voice. Per process, in memory.
+_QUOTA_UNTIL: dict[str, float] = {}
+
+
+def quota_remaining(model: str) -> float:
+    until = _QUOTA_UNTIL.get(model, 0.0)
+    left = until - time.monotonic()
+    if left <= 0:
+        _QUOTA_UNTIL.pop(model, None)
+        return 0.0
+    return left
+
+
+def note_quota(model: str, err: AidaError) -> None:
+    """Open the gate for `model` after a 429 (no-op when the gate is disabled)."""
+    if settings.tts_quota_cooldown <= 0:
+        return
+    wait = err.retry_after or settings.tts_quota_cooldown
+    wait = min(max(float(wait), settings.tts_quota_cooldown), settings.tts_quota_cooldown_max)
+    err.retry_after = math.ceil(wait)
+    was_open = quota_remaining(model) > 0
+    _QUOTA_UNTIL[model] = max(_QUOTA_UNTIL.get(model, 0.0), time.monotonic() + wait)
+    if not was_open:  # one log line per closed->open transition, not one per sentence
+        log.warning("tts %s: quota exceeded (429) - voice paused for %.0fs, browser voice "
+                    "meanwhile. Google said: %s", model, wait, err.detail[:300])
+
+
+def clear_quota(model: str) -> None:
+    _QUOTA_UNTIL.pop(model, None)
+
+
 def tts_models() -> list[str]:
-    """Main voice model, then the backup; one that just failed goes last."""
+    """Main voice model, then the backup; one that just failed goes last. A model in its
+    quota cool-down is left out; when none is left the request is refused at once with
+    `rate_limited` (+ how long to wait), without a single call to Google."""
     models = [settings.gemini_tts_model]
     if settings.tts_fallback_model:
         models.append(settings.tts_fallback_model)
-    return gemini.order_models(models)
+    models = gemini.order_models(models)
+    open_ = [m for m in models if quota_remaining(m) <= 0]
+    if not open_:
+        wait = math.ceil(min(quota_remaining(m) for m in models))
+        raise AidaError("rate_limited", "voice quota cool-down", retry_after=wait)
+    return open_
 
 
 def _interaction_args(model: str, text: str, voice: str) -> dict:
@@ -109,13 +153,19 @@ def _interaction_args(model: str, text: str, voice: str) -> dict:
 
 
 async def _synthesize_once(text: str, voice: str, model: str, *, attempts: int = 2) -> bytes:
-    client = gemini.get_client()
+    client = gemini.get_tts_client()
 
     async def call():
         return await client.aio.interactions.create(**_interaction_args(model, text, voice))
 
     async with _semaphore():
-        interaction = await gemini.call_with_retry(call, timeout=20.0, attempts=attempts)
+        try:
+            interaction = await gemini.call_with_retry(
+                call, timeout=20.0, attempts=attempts, fail_fast=("rate_limited",))
+        except AidaError as err:
+            if err.code == "rate_limited":
+                note_quota(model, err)
+            raise
     audio = getattr(interaction, "output_audio", None)
     data = getattr(audio, "data", None) if audio is not None else None
     if not data:
@@ -147,7 +197,8 @@ async def synthesize(text: str, gender: str = "female") -> tuple[bytes, float]:
             last = err
             if not err.retryable:
                 raise
-        gemini.mark_unhealthy(model)
+        if not (last and last.code == "rate_limited"):  # quota has its own gate
+            gemini.mark_unhealthy(model)
         if more:
             log.warning("tts failing over: %s -> %s", model, models[i + 1])
     raise last or AidaError("unavailable", "no voice model succeeded")
@@ -162,7 +213,7 @@ async def _stream_model(model: str, text: str, voice: str, info: dict):
     ai.google.dev/gemini-api/docs/speech-generation). First audio can arrive
     within a fraction of the time a whole-clip request needs.
     """
-    client = gemini.get_client()
+    client = gemini.get_tts_client()
     async with _semaphore():
         try:
             stream = await asyncio.wait_for(
@@ -171,7 +222,10 @@ async def _stream_model(model: str, text: str, voice: str, info: dict):
                 settings.tts_first_audio_timeout,
             )
         except Exception as exc:
-            raise gemini.map_exception(exc) from exc
+            err = gemini.map_exception(exc)
+            if err.code == "rate_limited":
+                note_quota(model, err)
+            raise err from exc
         it = stream.__aiter__()
         first, carry, produced = True, b"", False
         try:
@@ -182,7 +236,10 @@ async def _stream_model(model: str, text: str, voice: str, info: dict):
                 except StopAsyncIteration:
                     break
                 except Exception as exc:
-                    raise gemini.map_exception(exc) from exc
+                    err = gemini.map_exception(exc)
+                    if err.code == "rate_limited":
+                        note_quota(model, err)
+                    raise err from exc
                 if getattr(event, "event_type", None) != "step.delta":
                     continue
                 delta = getattr(event, "delta", None)
@@ -224,6 +281,7 @@ async def _synthesize_sequential(models: list[str], text: str, voice: str, info:
                 started = True
                 yield chunk
             gemini.mark_healthy(model)
+            clear_quota(model)
             return
         except AidaError as err:
             if started:
@@ -232,9 +290,10 @@ async def _synthesize_sequential(models: list[str], text: str, voice: str, info:
             last = err
             if not err.retryable:
                 raise
-            gemini.mark_unhealthy(model)
+            if err.code != "rate_limited":  # quota has its own gate (note_quota)
+                gemini.mark_unhealthy(model)
             if i + 1 < len(models):
-                log.warning("tts failing over: %s -> %s (%s)", model, models[i + 1], err.code)
+                log.info("tts failing over: %s -> %s (%s)", model, models[i + 1], err.code)
     raise last or AidaError("unavailable", "no voice model succeeded")
 
 
@@ -301,15 +360,17 @@ async def _synthesize_hedged(models: list[str], text: str, voice: str, info: dic
                     gemini.mark_unhealthy(first)  # too slow: the backup goes first for a while
                 info.update({k: v for k, v in infos[model].items() if v})
                 gemini.mark_healthy(model)
+                clear_quota(model)
                 yield payload
             elif kind == "err":
                 errors.add(model)
                 last = payload
                 if not payload.retryable:
                     raise payload
-                gemini.mark_unhealthy(model)
+                if payload.code != "rate_limited":  # quota has its own gate (note_quota)
+                    gemini.mark_unhealthy(model)
                 if backup not in tasks:
-                    log.warning("tts failing over: %s -> %s (%s)", first, backup, payload.code)
+                    log.info("tts failing over: %s -> %s (%s)", first, backup, payload.code)
                     launch(backup)
                 elif errors >= {first, backup}:
                     raise last

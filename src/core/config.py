@@ -126,6 +126,12 @@ class Settings(BaseSettings):
     # after this many seconds (and the first to produce wins). 0 = only after a failure.
     tts_hedge_after: float = 2.5
     tts_idle_timeout: float = 10.0         # silence between audio chunks
+    # Google answered a voice request with 429 (quota). That model is not asked again for
+    # at least this many seconds (longer when Google names a longer wait, never beyond
+    # `_max`) — requests in that window are refused instantly so the browser voice takes
+    # over at once instead of waiting for a timeout. 0 = no gate.
+    tts_quota_cooldown: float = 20.0
+    tts_quota_cooldown_max: float = 300.0
     tts_voice_female: str = "Kore"
     tts_voice_male: str = "Charon"
     # Optional per-language overrides (e.g. a Bangla voice from the Extended
@@ -141,7 +147,7 @@ class Settings(BaseSettings):
     memory_recall_k: int = 3
     # Seconds, counted from the START of the request. Recall now overlaps with the
     # database work, so most of this budget is already spent while the history loads.
-    memory_recall_timeout: float = 1.0
+    memory_recall_timeout: float = 0.6
     # Cosine distance cut-off: chunks farther than this are NOT injected. Tune
     # with scripts/smoke_test.py output; too high re-introduces irrelevant
     # context, too low disables memory.

@@ -68,10 +68,13 @@ def message_for(code: str, lang: str = "en") -> str:
 class AidaError(Exception):
     """An error whose `code` is safe to show; `detail` is for logs only."""
 
-    def __init__(self, code: str, detail: str = "") -> None:
+    def __init__(self, code: str, detail: str = "", *, retry_after: int = 0) -> None:
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code if code in MESSAGES else "internal"
         self.detail = detail
+        # Seconds until the provider is worth asking again (quota errors); sent to the
+        # client as `Retry-After` so it can stop asking instead of guessing.
+        self.retry_after = max(0, int(retry_after))
 
     @property
     def retryable(self) -> bool:
