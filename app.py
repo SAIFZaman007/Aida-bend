@@ -18,6 +18,7 @@ from src.core.database import aclose as db_aclose
 from src.core.database import init_db
 from src.core.errors import http_detail, request_lang
 from src.core.llm import llm
+from src.voice import gcloud_tts
 from src.voice.router import router as voice_router
 
 VERSION = "2.5.1"
@@ -91,8 +92,15 @@ async def lifespan(app: FastAPI):
         settings.gemini_embed_model,
         "redis" if redis_ok else "DISABLED (Postgres fallback)",
     )
+    if settings.tts_provider == "google_cloud":
+        if settings.tts_google_cloud:
+            log.info("Voice: Google Cloud TTS (Chirp 3 HD) first, Gemini TTS as backup")
+        else:
+            log.warning("TTS_PROVIDER=google_cloud but GOOGLE_TTS_API_KEY is empty: "
+                        "using the Gemini voice only")
     yield
     await llm.aclose()
+    await gcloud_tts.aclose()
     await redis_client.aclose()
     await db_aclose()
 

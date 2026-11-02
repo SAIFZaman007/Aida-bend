@@ -141,6 +141,20 @@ class Settings(BaseSettings):
     tts_voice_female_bn: str = ""
     tts_voice_male_bn: str = ""
     tts_style: str = ""  # optional speech_metadata style, e.g. "calm and warm"
+    # Which service speaks first: "gemini" (default, as before) or "google_cloud" (Cloud
+    # Text-to-Speech, Chirp 3 HD: its own quota/billing; Gemini TTS stays as the backup).
+    # Needs GOOGLE_TTS_API_KEY; without a key the Gemini voice is used and a warning is logged.
+    tts_provider: str = "gemini"
+    google_tts_api_key: str = ""
+    # Chirp 3 HD voices are named after stars: "<locale>-Chirp3-HD-<Name>". Give the bare
+    # <Name> (completed with the locale below) or a full voice name. Check what exists for
+    # your locale with scripts/list_gcloud_voices.py.
+    google_tts_voice_female: str = "Kore"
+    google_tts_voice_male: str = "Charon"
+    google_tts_voice_female_bn: str = ""   # optional Bangla-only overrides
+    google_tts_voice_male_bn: str = ""
+    google_tts_locale_bn: str = "bn-IN"
+    google_tts_locale_en: str = "en-US"
     tts_sample_rate: int = 24000
     tts_concurrency: int = 4
     max_tts_chars: int = 1500
@@ -172,6 +186,14 @@ class Settings(BaseSettings):
     # characters in, followed by a space) once this many characters have streamed without
     # a sentence end, so the voice can start on the first clause. 0 = off.
     first_clause_chars: int = 80
+
+    @field_validator("tts_provider")
+    @classmethod
+    def _check_tts_provider(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in {"gemini", "google_cloud"}:
+            raise ValueError("TTS_PROVIDER must be 'gemini' or 'google_cloud'")
+        return v
 
     @field_validator("llm_provider")
     @classmethod
@@ -220,6 +242,11 @@ class Settings(BaseSettings):
     @property
     def stt_mode(self) -> str:
         return "VERBATIM" if self.gemini_stt_mode.strip().upper() == "VERBATIM" else "SMART"
+
+    @property
+    def tts_google_cloud(self) -> bool:
+        """Cloud Text-to-Speech is the first-choice voice (selected AND a key is set)."""
+        return self.tts_provider.strip().lower() == "google_cloud" and bool(self.google_tts_api_key.strip())
 
     @property
     def tts_fallback_model(self) -> str:

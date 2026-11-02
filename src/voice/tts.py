@@ -1,4 +1,5 @@
-"""Text-to-speech via Gemini TTS (auto-detects Bangla / English).
+"""Text-to-speech: Gemini TTS (auto-detects Bangla / English), optionally behind Google
+Cloud Text-to-Speech (Chirp 3 HD, see gcloud_tts.py) when TTS_PROVIDER=google_cloud.
 
 Returns a 24 kHz mono 16-bit WAV, the same container the old Piper path
 returned, so the frontend's decodeAudioData + lip-sync pipeline is unchanged.
@@ -21,6 +22,7 @@ from src.core import gemini
 from src.core.config import settings
 from src.core.errors import AidaError
 from src.core.text import dominant_language
+from src.voice import gcloud_tts
 
 log = logging.getLogger("aida.tts")
 
@@ -135,6 +137,8 @@ def tts_models() -> list[str]:
     models = [settings.gemini_tts_model]
     if settings.tts_fallback_model:
         models.append(settings.tts_fallback_model)
+    if gcloud_tts.enabled():
+        models.insert(0, gcloud_tts.GCLOUD)  # first choice; the Gemini models are its backup
     models = gemini.order_models(models)
     open_ = [m for m in models if quota_remaining(m) <= 0]
     if not open_:
@@ -152,7 +156,19 @@ def _interaction_args(model: str, text: str, voice: str) -> dict:
     )
 
 
-async def _synthesize_once(text: str, voice: str, model: str, *, attempts: int = 2) -> bytes:
+async def _synthesize_once(text: str, voice: str, model: str, *, attempts: int = 2,
+                           gender: str = "female") -> bytes:
+    if model == gcloud_tts.GCLOUD:
+        async with _semaphore():
+            try:
+                pcm, rate = await gemini.call_with_retry(
+                    lambda: gcloud_tts.fetch(text, gender, dominant_language(text)),
+                    timeout=20.0, attempts=attempts, fail_fast=("rate_limited",))
+            except AidaError as err:
+                if err.code == "rate_limited":
+                    note_quota(model, err)
+                raise
+        return gcloud_tts.wav_of(pcm, rate)
     client = gemini.get_tts_client()
 
     async def call():
@@ -184,7 +200,8 @@ async def synthesize(text: str, gender: str = "female") -> tuple[bytes, float]:
         more = i + 1 < len(models)
         try:
             for attempt in (1, 2):
-                wav = await _synthesize_once(text, voice, model, attempts=1 if more else 2)
+                wav = await _synthesize_once(
+                    text, voice, model, attempts=1 if more else 2, gender=gender)
                 duration, rms = wav_info(wav)
                 if is_plausible(text, duration, rms):
                     gemini.mark_healthy(model)
@@ -205,6 +222,22 @@ async def synthesize(text: str, gender: str = "female") -> tuple[bytes, float]:
 
 
 # ----------------------------------------------------------------- streaming
+async def _stream_gcloud(text: str, info: dict):
+    """Cloud Text-to-Speech: one request per sentence; its PCM is handed on in chunks."""
+    async with _semaphore():
+        try:
+            pcm, rate = await gcloud_tts.fetch(
+                text, info.get("gender", "female"), dominant_language(text))
+        except AidaError as err:
+            if err.code == "rate_limited":
+                note_quota(gcloud_tts.GCLOUD, err)
+            raise
+    info["sample_rate"] = rate
+    info["model"] = gcloud_tts.GCLOUD
+    for chunk in gcloud_tts.chunks(pcm):
+        yield chunk
+
+
 async def _stream_model(model: str, text: str, voice: str, info: dict):
     """Yield raw PCM (16-bit LE mono) from one model as Google generates it.
 
@@ -213,6 +246,10 @@ async def _stream_model(model: str, text: str, voice: str, info: dict):
     ai.google.dev/gemini-api/docs/speech-generation). First audio can arrive
     within a fraction of the time a whole-clip request needs.
     """
+    if model == gcloud_tts.GCLOUD:
+        async for chunk in _stream_gcloud(text, info):
+            yield chunk
+        return
     client = gemini.get_tts_client()
     async with _semaphore():
         try:
@@ -417,8 +454,11 @@ async def synthesize_stream(text: str, gender: str, info: dict):
     `tts_hedge_after` seconds, instead of after its full timeout."""
     voice = settings.tts_voice(gender, dominant_language(text))
     info.setdefault("sample_rate", settings.tts_sample_rate)
+    info.setdefault("gender", gender)
     models = tts_models()
-    if len(models) > 1 and settings.tts_hedge_after > 0:
+    # Hedging doubles requests against the Gemini quota; it is only used between the two
+    # Gemini models (Cloud TTS has no such cap and is simply followed by them on failure).
+    if len(models) > 1 and settings.tts_hedge_after > 0 and gcloud_tts.GCLOUD not in models:
         gen = _synthesize_hedged(models, text, voice, info)
     else:
         gen = _synthesize_sequential(models, text, voice, info)
