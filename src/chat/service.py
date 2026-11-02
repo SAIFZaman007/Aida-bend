@@ -66,6 +66,14 @@ _BN_NOTE = (
     "The user's latest message is written in Bengali script: reply in natural "
     "Bengali script."
 )
+# The counterpart. Without it a long Bengali history keeps pulling the reply into Bengali
+# after the person has switched to English (language inertia), and the voice then reads
+# English words with a Bengali voice.
+_EN_NOTE = (
+    "The user's latest message is written in English: reply in English, even if "
+    "earlier messages in this conversation were in Bengali — unless the user "
+    "explicitly asks for another language."
+)
 
 
 async def _recent_history_db(session: AsyncSession, conversation_id: str) -> list[dict]:
@@ -188,8 +196,11 @@ def build_messages(
     persona: str | None = None,
 ) -> list[dict]:
     persona_prompt = system_prompt(persona or conv.persona)
-    if detect_language(user_text) == "bn":
+    lang = detect_language(user_text)
+    if lang == "bn":
         persona_prompt += " " + _BN_NOTE
+    elif lang == "en":
+        persona_prompt += " " + _EN_NOTE
     messages: list[dict] = [{"role": "system", "content": persona_prompt}]
 
     if recalled:

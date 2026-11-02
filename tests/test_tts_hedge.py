@@ -125,3 +125,29 @@ async def test_hedge_can_be_switched_off(monkeypatch):
     started, _ = install(monkeypatch, {MAIN: (0.3, [b"aa"], None), BACKUP: (0.0, [b"zz"], None)})
     out, _ = await run()
     assert out == [b"aa"] and started == [MAIN]                 # waited for the main model only
+
+
+async def test_every_clip_logs_one_first_audio_line(monkeypatch, caplog):
+    import logging
+
+    install(monkeypatch, {MAIN: (0.0, [b"aa"], None), BACKUP: (0.0, [b"zz"], None)})
+    with caplog.at_level(logging.INFO, logger="aida.tts"):
+        await run("Hello there, friend.")
+    lines = [r.getMessage() for r in caplog.records if "tts first-audio" in r.getMessage()]
+    assert len(lines) == 1
+    assert "chars=20" in lines[0] and "lang=en" in lines[0] and "hedged=False" in lines[0]
+
+
+async def test_a_hedged_clip_says_so_in_the_log(monkeypatch, caplog):
+    import logging
+
+    install(monkeypatch, {MAIN: (2.0, [b"aa"], None), BACKUP: (0.01, [b"zz"], None)})
+    with caplog.at_level(logging.INFO, logger="aida.tts"):
+        await run()
+    assert any("hedged=True" in r.getMessage() for r in caplog.records)
+
+
+def test_default_hedge_is_above_the_usual_first_audio_time():
+    from src.core.config import Settings
+
+    assert Settings.model_fields["tts_hedge_after"].default >= 4.5

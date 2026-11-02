@@ -101,3 +101,32 @@ def test_unknown_persona_falls_back_to_the_default():
 
 def test_nonstop_uses_the_general_chat_model():
     assert settings.model_for_persona("nonstop") == settings.chat_model
+
+
+# ---- who made AIDA: Maktech, in every mode, with nothing invented -----------------
+@pytest.mark.parametrize("mode", PICKER + ("developer", "ccna_trainer"))
+def test_every_mode_knows_maktech_made_it(mode):
+    p = system_prompt(mode)
+    assert "WHO MADE YOU" in p and "developed by Maktech" in p
+    assert "maktechgroup.com" in p
+    # the grounded company facts are there...
+    assert "scalable digital products" in p and "ambitious businesses" in p
+    assert "seven specialised modes" in p
+    # ...and so is the guard against inventing the rest
+    assert "never guess" in p and "founders" in p
+
+
+def test_maktech_block_is_shared_not_copied_per_mode():
+    from src.agents import prompts
+    assert prompts._MAKTECH in prompts._IDENTITY
+    for mode in PICKER:
+        assert system_prompt(mode).count("WHO MADE YOU") == 1, mode
+
+
+def test_maktech_block_does_not_claim_unverified_facts():
+    from src.agents import prompts
+    block = prompts._MAKTECH.lower()
+    # nothing numeric (years, headcount, prices) may appear in the curated block
+    assert not any(ch.isdigit() for ch in block)
+    for forbidden in ("founded in", "ceo", "employees", "headquarter"):
+        assert forbidden not in block

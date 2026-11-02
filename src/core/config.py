@@ -124,7 +124,9 @@ class Settings(BaseSettings):
     tts_first_audio_timeout: float = 7.0   # no first audio byte by then -> that model has failed
     # The backup voice model is also started when the main one has not produced audio
     # after this many seconds (and the first to produce wins). 0 = only after a failure.
-    tts_hedge_after: float = 2.5
+    # Every hedge is a second billed/quota-counted request, so this sits ABOVE the usual
+    # first-audio time (measured 4-6 s): only a genuinely slow clip is doubled.
+    tts_hedge_after: float = 5.0
     tts_idle_timeout: float = 10.0         # silence between audio chunks
     # Google answered a voice request with 429 (quota). That model is not asked again for
     # at least this many seconds (longer when Google names a longer wait, never beyond

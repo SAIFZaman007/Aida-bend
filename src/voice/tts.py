@@ -255,6 +255,8 @@ async def _stream_model(model: str, text: str, voice: str, info: dict):
                 usable = len(buf) - (len(buf) % 2)  # never split a 16-bit sample
                 carry = buf[usable:]
                 if usable:
+                    if first:
+                        info["model"] = model  # which model actually produced this clip
                     first = False
                     produced = True
                     yield buf[:usable]
@@ -324,6 +326,8 @@ async def _synthesize_hedged(models: list[str], text: str, voice: str, info: dic
             await queue.put((model, "err", gemini.map_exception(exc)))
 
     def launch(model: str) -> None:
+        if tasks:
+            info["hedged"] = True  # the backup was asked too: this clip cost two requests
         tasks[model] = asyncio.create_task(pump(model))
 
     async def stop_all(keep: str | None = None) -> None:
@@ -418,8 +422,18 @@ async def synthesize_stream(text: str, gender: str, info: dict):
         gen = _synthesize_hedged(models, text, voice, info)
     else:
         gen = _synthesize_sequential(models, text, voice, info)
+    t0 = time.monotonic()
+    first_chunk = True
     try:
         async for chunk in gen:
+            if first_chunk:
+                first_chunk = False
+                # One line per clip: where the "voice takes seconds" time goes (see scripts/bench_latency.py).
+                log.info(
+                    "tts first-audio %dms model=%s chars=%d lang=%s hedged=%s",
+                    round((time.monotonic() - t0) * 1000), info.get("model", models[0]),
+                    len(text), dominant_language(text), bool(info.get("hedged")),
+                )
             yield chunk
     finally:
         await gen.aclose()
