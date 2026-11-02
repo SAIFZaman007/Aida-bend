@@ -103,7 +103,7 @@ def test_nonstop_uses_the_general_chat_model():
     assert settings.model_for_persona("nonstop") == settings.chat_model
 
 
-# ---- who made AIDA: Maktech, in every mode, with nothing invented -----------------
+# ---- who made Aida: Maktech, in every mode, with nothing invented -----------------
 @pytest.mark.parametrize("mode", PICKER + ("developer", "ccna_trainer"))
 def test_every_mode_knows_maktech_made_it(mode):
     p = system_prompt(mode)
@@ -113,7 +113,7 @@ def test_every_mode_knows_maktech_made_it(mode):
     assert "scalable digital products" in p and "ambitious businesses" in p
     assert "seven specialised modes" in p
     # ...and so is the guard against inventing the rest
-    assert "never guess" in p and "founders" in p
+    assert "never guess" in p and "You know nothing else about Maktech" in p
 
 
 def test_maktech_block_is_shared_not_copied_per_mode():
@@ -126,7 +126,51 @@ def test_maktech_block_is_shared_not_copied_per_mode():
 def test_maktech_block_does_not_claim_unverified_facts():
     from src.agents import prompts
     block = prompts._MAKTECH.lower()
-    # nothing numeric (years, headcount, prices) may appear in the curated block
-    assert not any(ch.isdigit() for ch in block)
-    for forbidden in ("founded in", "ceo", "employees", "headquarter"):
+    # nothing the owner did not supply: no year, headcount, price or history
+    for forbidden in ("founded in", "employees", "headquarter", "since 20", "$", "clients include"):
         assert forbidden not in block
+
+
+# ---- common facts the owner supplied: identical in EVERY mode ----------------------
+COMMON_FACTS = (
+    "Your name is Aida",
+    "developed by Maktech",
+    "maktechgroup.com",
+    "CEO and Founder of Maktech is Mohammad Alamgir Kabir",
+    "info@maktechgroup.com",
+    "career@maktechgroup.com",
+    "+880 1897-669234",
+    "8th Floor, A, Majid Tower, Ka-24 Progati Sarani Road, Dhaka 1229",
+)
+
+
+@pytest.mark.parametrize("mode", PICKER + ("developer", "ccna_trainer"))
+def test_every_mode_knows_the_common_facts(mode):
+    p = system_prompt(mode)
+    for fact in COMMON_FACTS:
+        assert fact in p, f"{mode} is missing: {fact}"
+
+
+def test_the_ceo_name_is_never_written_in_capitals():
+    from src.agents import prompts
+    assert "MOHAMMAD" not in prompts._MAKTECH and "KABIR" not in prompts._MAKTECH  # a voice would spell caps
+
+
+@pytest.mark.parametrize("mode", PICKER)
+def test_the_name_is_a_name_not_an_abbreviation(mode):
+    p = system_prompt(mode)
+    assert "write it 'Aida' in English text and 'আইডা' in Bengali text" in p
+    assert "never write 'A.I.D.A' or 'AIDA' yourself" in p
+    assert "Your name is A.I.D.A" not in p
+
+
+@pytest.mark.parametrize("mode", SPECIALISTS)
+def test_each_specialist_has_its_own_voice_and_introduces_itself(mode):
+    p = system_prompt(mode)
+    assert "HOW YOU SOUND:" in p
+    assert "say you are Aida in" in p and "mode and describe your field" in p
+
+
+def test_specialist_manners_are_all_different():
+    manners = {m: system_prompt(m).split("HOW YOU SOUND:")[1].split(" SCOPE:")[0] for m in SPECIALISTS}
+    assert len(set(manners.values())) == len(SPECIALISTS)

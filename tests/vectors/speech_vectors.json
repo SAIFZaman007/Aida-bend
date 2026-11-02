@@ -70,6 +70,81 @@
       "id": "empty",
       "in": "",
       "out": ""
+    },
+    {
+      "id": "name-aida-dotted-en",
+      "in": "I'm A.I.D.A, your assistant.",
+      "out": "I'm Aida, your assistant."
+    },
+    {
+      "id": "name-aida-caps-en",
+      "in": "Hello, I am AIDA.",
+      "out": "Hello, I am Aida."
+    },
+    {
+      "id": "name-aida-sentence-end",
+      "in": "Welcome to A.I.D.A. How can I help?",
+      "out": "Welcome to Aida. How can I help?"
+    },
+    {
+      "id": "name-aida-in-bengali",
+      "in": "আমি Aida, আপনার সহকারী।",
+      "out": "আমি আইডা, আপনার সহকারী।"
+    },
+    {
+      "id": "name-aida-dotted-in-bengali",
+      "in": "আপনার স্বাগতম, আমি A.I.D.A এবং আমি আপনাকে সাহায্য করব।",
+      "out": "আপনার স্বাগতম, আমি আইডা এবং আমি আপনাকে সাহায্য করব।"
+    },
+    {
+      "id": "email-spoken",
+      "in": "Email us at info@maktechgroup.com or career@maktechgroup.com.",
+      "out": "Email us at info at maktechgroup dot com or career at maktechgroup dot com."
+    },
+    {
+      "id": "email-in-bengali",
+      "in": "আমাদের সাথে যোগাযোগ করতে আমাদের ইমেইল ঠিকানা info@maktechgroup.com এ মেইল করুন।",
+      "out": "আমাদের সাথে যোগাযোগ করতে আমাদের ইমেইল ঠিকানা info অ্যাট maktechgroup ডট com এ মেইল করুন।"
+    },
+    {
+      "id": "website-spoken",
+      "in": "Visit https://maktechgroup.com/ today.",
+      "out": "Visit maktechgroup dot com today."
+    },
+    {
+      "id": "website-www-sentence-end",
+      "in": "Visit www.maktechgroup.com.",
+      "out": "Visit maktechgroup dot com."
+    },
+    {
+      "id": "phone-international",
+      "in": "Call +880 1897-669234 now.",
+      "out": "Call plus 8 8 0, 1 8 9 7, 6 6 9 2 3 4 now."
+    },
+    {
+      "id": "phone-in-bengali",
+      "in": "ফোন করুন +880 1897-669234 নম্বরে।",
+      "out": "ফোন করুন প্লাস 8 8 0, 1 8 9 7, 6 6 9 2 3 4 নম্বরে।"
+    },
+    {
+      "id": "phone-local-bengali-digits",
+      "in": "ফোন ০১৮৯৭-৬৬৯২৩৪ নম্বরে।",
+      "out": "ফোন ০ ১ ৮ ৯ ৭, ৬ ৬ ৯ ২ ৩ ৪ নম্বরে।"
+    },
+    {
+      "id": "address-road-and-postal-code",
+      "in": "Find us at 8th Floor, A, Majid Tower, Ka-24 Progati Sarani Rd, Dhaka 1229.",
+      "out": "Find us at 8th Floor, A, Majid Tower, Ka-24 Progati Sarani Road, Dhaka 1 2 2 9."
+    },
+    {
+      "id": "postal-code-bengali",
+      "in": "ঠিকানা: ঢাকা-১২২৯।",
+      "out": "ঠিকানা: ঢাকা-১ ২ ২ ৯।"
+    },
+    {
+      "id": "digit-groups-that-are-not-phones",
+      "in": "We shipped 1 000 000 units.",
+      "out": "We shipped 1 000 000 units."
     }
   ],
   "detect_language": [

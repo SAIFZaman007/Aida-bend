@@ -16,6 +16,13 @@ Rules, and why they are language-aware (v2.1):
   • Bengali symbols are spoken in Bengali (% -> শতাংশ, & -> এবং, ...).
   • Digit runs that are really identifiers (leading zero, or 11+ digits: phone
     numbers, IDs) are read digit by digit, not as one huge cardinal.
+  • The assistant's own name is a NAME, not an abbreviation (v3.2): "A.I.D.A", "AIDA"
+    and "Aida" are all spoken as the word "Aida" (written আইডা inside Bengali text, so
+    the Bengali voice says it as a word too) instead of being read letter by letter.
+  • Contact details are spoken, not spelled: "info@maktechgroup.com" -> "info at
+    maktechgroup dot com", "maktechgroup.com" -> "maktechgroup dot com", a phone number
+    -> its digits in groups ("+880 1897-669234" -> "plus 8 8 0, 1 8 9 7, 6 6 9 2 3 4"),
+    a postal code after "Dhaka" -> digit by digit, "Rd" -> "Road".
 """
 import re
 
@@ -67,6 +74,20 @@ _REPEATED_CHAR_RE = re.compile(r"([^\d\s])\1{2,}")
 # ASCII words only (see module docstring).
 _REPEATED_WORD_RE = re.compile(r"\b([A-Za-z0-9_]+)(?:\s+\1\b){2,}", re.IGNORECASE | re.ASCII)
 _ACRONYM_RE = re.compile(r"\b[A-Z]{2,6}\b", re.ASCII)
+
+# --- The assistant's name (spoken as a word) --------------------------------
+_NAME_RE = re.compile(r"\bA\.I\.D\.A\b|\bAIDA\b|\bAida\b", re.ASCII)
+_SPOKEN_NAME = {"en": "Aida", "bn": "আইডা"}
+
+# --- Contact details --------------------------------------------------------
+_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b", re.ASCII)
+_DOMAIN_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|ai|app|dev|co|info|edu|gov|bd))\b"
+    r"(?:/(?!\w))?", re.IGNORECASE | re.ASCII)
+# digit groups of 3+ after the first ("+880 1897-669234"); dates ("2026-11-02") never match
+_PHONE_RE = re.compile(r"\+?\d+(?:[ \-]\d{3,})+")
+_POSTAL_RE = re.compile(r"(Dhaka|ঢাকা)([\s\-–]+)(\d{4})(?!\d)")
+_ROAD_RE = re.compile(r"\bRd\b\.?", re.ASCII)
 
 _ONES = [
     "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
@@ -120,6 +141,26 @@ def _spell_number(match: "re.Match[str]") -> str:
     return _cardinal(int(digits))
 
 
+def _dot_words(address: str, lang: str) -> str:
+    dot = " dot " if lang == "en" else " ডট "
+    return address.replace(".", dot)
+
+
+def _speak_email(m: "re.Match[str]", lang: str) -> str:
+    local, _, domain = m.group(0).partition("@")
+    at = _SYMBOLS[lang]["@"]
+    return f"{_dot_words(local, lang)} {at} {_dot_words(domain, lang)}"
+
+
+def _speak_phone(m: "re.Match[str]") -> str:
+    text = m.group(0)
+    groups = re.findall(r"\d+", text)
+    if sum(len(g) for g in groups) < 9:  # not a phone number (e.g. "1 000 000")
+        return text
+    spoken = ", ".join(" ".join(g) for g in groups)
+    return ("+" if text.startswith("+") else "") + spoken
+
+
 def normalize_for_speech(text: str, lang: str | None = None) -> str:
     """Make text read naturally by a TTS voice. `lang` ('bn'|'en') is detected
     from the text when omitted."""
@@ -128,6 +169,12 @@ def normalize_for_speech(text: str, lang: str | None = None) -> str:
     lang = lang or dominant_language(text)
     t = text
 
+    t = _NAME_RE.sub(_SPOKEN_NAME[lang], t)
+    t = _EMAIL_RE.sub(lambda m: _speak_email(m, lang), t)
+    t = _DOMAIN_RE.sub(lambda m: _dot_words(m.group(1), lang), t)
+    t = _PHONE_RE.sub(_speak_phone, t)
+    t = _POSTAL_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{' '.join(m.group(3))}", t)
+
     t = _REPEATED_CHAR_RE.sub(lambda m: m.group(1), t)
     t = _REPEATED_WORD_RE.sub(lambda m: m.group(1), t)
 
@@ -135,6 +182,7 @@ def normalize_for_speech(text: str, lang: str | None = None) -> str:
         t = _ASCII_DIGIT_RUN_RE.sub(_spell_number, t)
         for pattern, repl in _ABBREV_MAP:
             t = pattern.sub(repl, t)
+        t = _ROAD_RE.sub("Road", t)
         t = _ACRONYM_RE.sub(lambda m: _ACRONYM_WORDS.get(m.group(0), m.group(0)), t)
 
     sym = _SYMBOLS[lang]
