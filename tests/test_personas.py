@@ -174,3 +174,36 @@ def test_each_specialist_has_its_own_voice_and_introduces_itself(mode):
 def test_specialist_manners_are_all_different():
     manners = {m: system_prompt(m).split("HOW YOU SOUND:")[1].split(" SCOPE:")[0] for m in SPECIALISTS}
     assert len(set(manners.values())) == len(SPECIALISTS)
+
+
+# ---- software / IT questions: every mode points to Maktech, in its own way ---------
+@pytest.mark.parametrize("mode", PICKER + ("developer", "ccna_trainer"))
+def test_every_mode_refers_software_and_it_service_questions_to_maktech(mode):
+    p = system_prompt(mode)
+    assert "SERVICES AND CONSULTATION" in p
+    for topic in ("web development", "IT services", "software development", "consultation"):
+        assert topic in p, (mode, topic)
+    assert "maktechgroup.com" in p
+    # the mode keeps its own field: the pointer follows the answer, it never replaces it
+    assert "never instead of answering" in p
+    assert "SCOPE" in p or mode == "nonstop"
+
+
+def test_the_referral_block_is_shared_not_copied_per_mode():
+    from src.agents import prompts
+    assert prompts._MAKTECH_REFERRAL in prompts._IDENTITY
+    for mode in PICKER:
+        assert system_prompt(mode).count("SERVICES AND CONSULTATION") == 1, mode
+
+
+def test_the_referral_promises_nothing_it_cannot_know():
+    from src.agents import prompts
+    block = prompts._MAKTECH_REFERRAL.lower()
+    assert "promise nothing about prices, timelines" in block
+    for forbidden in ("cheapest", "best in", "guarantee", "years of experience", "$"):
+        assert forbidden not in block
+
+
+def test_the_referral_is_not_repeated_every_turn():
+    from src.agents import prompts
+    assert "do not repeat the same pointer in consecutive replies" in prompts._MAKTECH_REFERRAL
