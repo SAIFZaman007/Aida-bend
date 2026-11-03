@@ -22,7 +22,7 @@ v2.5 — speed and per-mode knowledge:
  • The mode can travel with the request (`persona`): the reply uses the mode the
    person is looking at even if the separate "change mode" call has not landed yet.
  • Recall and storage are partitioned per mode (memory/service.py): a specialist
-   recalls its own exchanges, Non-stop recalls all.
+   recalls its own exchanges, Aida (the generalist mode) recalls all.
  • The first sentence is released early at a clause break when the model writes a
    long opening sentence, so the voice can start sooner (core/text.py).
 

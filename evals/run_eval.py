@@ -51,13 +51,13 @@ HEDGE = re.compile(
 
 
 # A polite decline of an out-of-scope question: it says the topic is outside the mode's
-# field and/or points to Non-stop or another mode (English + Bengali).
+# field and/or points to Aida mode or another mode (English + Bengali).
 DECLINE = re.compile(
     r"(outside (of )?(my|this)|not (in|within|part of) my (field|area|expertise|scope)|"
     r"beyond my (field|scope)|isn't (in|within) my|fall[s]? outside|"
-    r"non-stop mode|better (suited|handled)|"
+    r"aida mode|non-stop mode|better (suited|handled)|"
     r"আমার (ক্ষেত্র|বিষয়|দক্ষতা)[^।]{0,30}(বাইরে|নয়)|ক্ষেত্রের বাইরে|"
-    r"নন-স্টপ|Non-stop)",
+    r"নন-স্টপ|Non-stop|Aida mode)",
     re.IGNORECASE,
 )
 

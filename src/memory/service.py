@@ -16,9 +16,9 @@ v2.5 — a KNOWLEDGE BASE PER MODE (no schema change, no migration):
    A specialist mode (Coder, Security, …) recalls ONLY its own exchanges plus the
    shared notes of the project (any source that does not start with "message");
    it no longer sees what was said in the other modes.
- • Non-stop is the generalist: it recalls everything in the project.
+ • Aida mode is the generalist: it recalls everything in the project.
  • Exchanges stored before v2.5 (plain source "message", mode unknown) are
-   therefore visible to Non-stop only.
+   therefore visible to Aida mode only.
 """
 import logging
 
@@ -75,7 +75,7 @@ def recall_statement(
     """The recall query (separate so it can be compiled/inspected in tests).
 
     With a specialist `persona` the rows are limited to that mode's own exchanges
-    and to shared notes; with Non-stop (or no persona) nothing is filtered."""
+    and to shared notes; with Aida mode (or no persona) nothing is filtered."""
     dist = MemoryChunk.embedding.cosine_distance(query_vec)
     stmt = (
         select(MemoryChunk.content, dist.label("distance"))

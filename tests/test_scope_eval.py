@@ -11,7 +11,7 @@ spec.loader.exec_module(run_eval)
 
 def test_a_polite_decline_passes_and_an_answer_fails():
     case = {"type": "scope", "expect": "decline", "forbid": [r"\bParis\b"]}
-    assert run_eval.judge(case, "That is outside my field as Aida in Coder mode. Non-stop mode can help with anything.")
+    assert run_eval.judge(case, "That is outside my field as Aida in Coder mode. Aida mode can help with anything.")
     assert not run_eval.judge(case, "The capital of France is Paris.")
     assert not run_eval.judge(case, "Paris. Anyway, that is outside my field.")   # answered AND declined
 
