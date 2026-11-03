@@ -50,6 +50,18 @@ HEDGE = re.compile(
 )
 
 
+# A polite decline of an out-of-scope question: it says the topic is outside the mode's
+# field and/or points to Non-stop or another mode (English + Bengali).
+DECLINE = re.compile(
+    r"(outside (of )?(my|this)|not (in|within|part of) my (field|area|expertise|scope)|"
+    r"beyond my (field|scope)|isn't (in|within) my|fall[s]? outside|"
+    r"non-stop mode|better (suited|handled)|"
+    r"আমার (ক্ষেত্র|বিষয়|দক্ষতা)[^।]{0,30}(বাইরে|নয়)|ক্ষেত্রের বাইরে|"
+    r"নন-স্টপ|Non-stop)",
+    re.IGNORECASE,
+)
+
+
 def bn_ratio(t: str) -> float:
     bn, lat = script_counts(t)
     return bn / (bn + lat) if bn + lat else 0.0
@@ -67,6 +79,15 @@ def judge(case: dict, reply: str) -> bool:
         if any(re.search(p, reply, re.IGNORECASE) for p in case.get("forbid", [])):
             return False
         return bool(HEDGE.search(reply))
+    if kind == "scope":
+        # Specialists answer only their field, Aida and Maktech. "decline": a short, polite
+        # refusal that does not contain the answer. "answer": a real in-scope reply, no decline.
+        if any(re.search(p, reply, re.IGNORECASE) for p in case.get("forbid", [])):
+            return False
+        declined = bool(DECLINE.search(reply))
+        if case["expect"] == "decline":
+            return declined and len(reply) <= 500
+        return (not declined) and all(re.search(p, reply, re.IGNORECASE) for p in case.get("require", []))
     raise ValueError(kind)
 
 
@@ -78,7 +99,7 @@ async def main(runs: int) -> int:
     for case in spec["cases"]:
         oks, sample = [], ""
         for _ in range(runs):
-            msgs = [{"role": "system", "content": system_prompt("executive")},
+            msgs = [{"role": "system", "content": system_prompt(case.get("persona", "executive"))},
                     {"role": "user", "content": case["prompt"]}]
             reply = await llm.complete(msgs)
             oks.append(judge(case, reply))
